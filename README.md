@@ -205,6 +205,7 @@ The bot accepts private messages from the configured owner. It uses long polling
 | `/status`, `/queue`, `/settings` | Inspect the selected profile; append `all` to status or queue for all profiles |
 | `/preview JOB_ID`, `/upload JOB_ID` | Receive a finished video or queue it for publishing |
 | `/pause`, `/resume`, `/retry JOB_ID` | Control production and retry jobs |
+| `/update` | Check for a newer release without changing files |
 | `/pause all`, `/resume all` | Control the global queue |
 
 <details>
@@ -291,6 +292,15 @@ launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/dev.shorts-local.plist
 
 For recovery procedures, job states, and migration details, see the [operations guide](docs/operations.md).
 
+### Updates
+
+```bash
+.venv/bin/shorts-local --version
+.venv/bin/shorts-local update
+```
+
+`update` checks the latest GitHub release. It changes the checkout only when this repository is clean and `serve` is not running. Telegram `/update` reports the release and does not change files.
+
 ### Cost model
 
 The default MLX workflow uses local compute and public model weights, with no recurring inference or hosting subscription. Hardware, electricity, internet access, and any optional existing subscription are outside that service-cost budget. Downloads and external integrations require internet access; core story generation runs locally once its models are cached.
@@ -366,7 +376,7 @@ Checked on **October 11, 2026**, on an M5 MacBook Air with 24 GB unified memory.
 
 | Check | Result |
 | --- | --- |
-| Automated regression suite | **218 passed** |
+| Automated regression suite | **222 passed** |
 | Static checks and dependency lock | Ruff and `uv lock --check` passed |
 | Packaging | Wheel and source distribution built |
 | Story pipeline | Local planning, Korean narration, and generated images; 65.21-second output |

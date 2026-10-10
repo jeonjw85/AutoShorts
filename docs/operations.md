@@ -34,7 +34,11 @@ CLI의 인자 없는 `pause`/`resume`은 전체, `--channel animals`는 해당 �
 .venv/bin/shorts-local resume
 .venv/bin/shorts-local retry 작업ID
 .venv/bin/shorts-local work
+.venv/bin/shorts-local --version
+.venv/bin/shorts-local update
 ```
+
+`update`는 GitHub 최신 릴리즈를 확인합니다. 이 저장소의 깨끗한 checkout이고 `serve`가 멈춰 있을 때만 태그를 받아 현재 설치된 옵션으로 `uv sync`합니다. 로컬 수정이나 실행 중인 서비스가 있으면 멈추고 이유만 알려줍니다. Telegram `/update`는 확인만 합니다.
 
 ## 업로드 중 네트워크가 끊긴 경우
 
