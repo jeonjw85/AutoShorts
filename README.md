@@ -47,9 +47,12 @@ The production CLI currently supports `story` and `instagram`; news cards remain
 
 ### 1. Install and initialize
 
-Run these commands from the project directory. This example uses [Homebrew](https://brew.sh/) for system tools:
+Clone the repository and install the local toolchain. This example uses [Homebrew](https://brew.sh/) for system tools:
 
 ```bash
+git clone https://github.com/jeonjw85/AutoShorts.git
+cd AutoShorts
+
 brew install uv ffmpeg
 uv sync --extra mlx --group dev
 
@@ -391,7 +394,7 @@ uv build
 src/shorts_local/   CLI, queue, pipelines, model workers, and integrations
 tests/             Unit, integration, recovery, and media tests
 examples/          Hand-written sample scripts
-docs/              Design, implementation, and operations references
+docs/              Operations and recovery reference
 data/              Local runtime state and generated media; gitignored
 ```
 
