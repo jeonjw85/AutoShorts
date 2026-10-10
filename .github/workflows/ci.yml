@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install dependencies
+        run: uv sync --group dev && uv pip install --python .venv/bin/python instaloader==4.15.3
+      - name: Lint
+        run: uv run --no-sync ruff check src tests
+      - name: Test
+        run: uv run --no-sync python -m pytest -q
+      - name: Check lockfile
+        run: uv lock --check
+      - name: Build package
+        run: uv build
