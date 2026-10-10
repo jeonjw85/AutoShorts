@@ -144,23 +144,32 @@ def test_sampling_uses_real_video_frames_when_audio_ends_later(tmp_path):
 
 
 def test_visual_generation_bounds_json_before_token_exhaustion(tmp_path, monkeypatch):
-    from types import SimpleNamespace
+    import sys
+    from types import ModuleType, SimpleNamespace
 
-    import mlx_vlm
-    import mlx_vlm.prompt_utils
-    import mlx_vlm.structured
-
+    mlx_vlm = ModuleType("mlx_vlm")
+    prompt_utils = ModuleType("mlx_vlm.prompt_utils")
+    structured = ModuleType("mlx_vlm.structured")
+    monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.prompt_utils", prompt_utils)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.structured", structured)
     import shorts_local.analysis_engines as engines
 
-    monkeypatch.setattr(engines, "_vision_model", lambda _: (SimpleNamespace(config={}), SimpleNamespace(tokenizer="fixture")))
-    monkeypatch.setattr(mlx_vlm.prompt_utils, "apply_chat_template", lambda *a, **kw: "images")
+    monkeypatch.setattr(engines, "_vision_model", lambda _: (
+        SimpleNamespace(config={}), SimpleNamespace(tokenizer="fixture")))
+    prompt_utils.apply_chat_template = lambda *args, **kwargs: "images"
+
     def constraint(tokenizer, schema):
         assert schema["minItems"] == schema["maxItems"] == 2
         assert schema["items"]["maxLength"] == 200
         return "bounded-json"
-    monkeypatch.setattr(mlx_vlm.structured, "build_json_schema_logits_processor", constraint)
+
+    structured.build_json_schema_logits_processor = constraint
+
     def generate(*args, **kwargs):
-        return SimpleNamespace(text='["Clock", "Woman"]' if kwargs.get("logits_processors") == ["bounded-json"]
-                               else '["Clock", "A woman ' + "visible " * 1000)
-    monkeypatch.setattr(mlx_vlm, "generate", generate)
+        if kwargs.get("logits_processors") == ["bounded-json"]:
+            return SimpleNamespace(text='["Clock", "Woman"]')
+        return SimpleNamespace(text='["Clock", "A woman ' + "visible " * 1000)
+
+    mlx_vlm.generate = generate
     assert engines.describe_images(Settings(), [tmp_path / "a.png", tmp_path / "b.png"]) == ["Clock", "Woman"]
