@@ -1,6 +1,8 @@
 # AutoShorts
 
-**A local-first production pipeline for narrated Shorts on Apple Silicon.**
+Make Korean Shorts on an Apple Silicon Mac. The app writes scripts, records narration, edits vertical video, and can upload to YouTube. Use the CLI or a private Telegram bot.
+
+Models run on the Mac. The default workflow does not need a paid inference API or a hosted server.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-0F766E)](pyproject.toml)
@@ -12,20 +14,16 @@
 [![uv](https://img.shields.io/badge/Package_manager-uv-DE5FE9?logo=uv&logoColor=white)](https://docs.astral.sh/uv/)
 [![Ruff](https://img.shields.io/badge/Lint-Ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
 
-[Quickstart](#quickstart) · [Workflows](#workflows) · [Channels](#channels) · [Integrations](#integrations) · [Operations](#operations) · [Development](#development) · [License](#license)
-
-Turn ideas and Instagram videos into Korean-language Shorts. Generate scripts and narration locally, compose vertical videos, and manage channel-specific production through a CLI or a private Telegram bot.
-
-Core inference runs on your Mac. The default workflow requires no paid inference API or hosted backend.
+[Quickstart](#quickstart) | [Workflows](#workflows) | [Channels](#channels) | [Integrations](#integrations) | [Operations](#operations) | [Development](#development) | [License](#license)
 
 ## Highlights
 
-- **Local AI pipeline** — MLX-powered planning, speech synthesis, transcription, and visual analysis.
-- **Channel-aware automation** — independent schedules, styles, publishing targets, and pause controls.
-- **Two Instagram editing modes** — new Korean narration or original audio with Korean subtitles.
-- **Recoverable jobs** — persisted stages, bounded retries, deduplication, and resumable uploads.
-- **Remote control** — queue jobs, change settings, and receive previews through Telegram.
-- **Standard video output** — 9:16, 1080 × 1920, 30 fps, H.264 video, and AAC audio by default.
+- Planning, speech, transcription, and visual analysis run locally with MLX.
+- Each channel has its own schedule, style, upload target, and pause control.
+- Instagram edits can add Korean narration or keep the original audio with Korean subtitles.
+- Completed stages are kept. Retries are limited, and an interrupted upload can resume.
+- Telegram can queue jobs, change settings, and send a preview.
+- Default output is 9:16, 1080 x 1920, 30 fps, H.264, and AAC.
 
 ## Workflows
 
@@ -105,7 +103,7 @@ Instagram jobs additionally retain source media, transcripts, visual observation
 
 ## Channels
 
-Each profile owns its content settings, daily schedule, and YouTube binding. Profiles share one bot, one SQLite-backed queue, and one sequential AI worker.
+Each profile has its own content settings, daily schedule, and YouTube account. Profiles share one bot, one SQLite queue, and one worker. The worker runs one heavy job at a time.
 
 ```bash
 .venv/bin/shorts-local channel add animals --name "Animal Stories"
@@ -131,12 +129,12 @@ Each profile owns its content settings, daily schedule, and YouTube binding. Pro
 | Instagram collection interval | 60 minutes |
 
 - Settings are stored in `data/state.sqlite3`. Inspect them with `config`; use `--values` for an atomic update of related fields.
-- Jobs snapshot their channel, settings, and inputs when queued. Later configuration changes apply to new jobs, and publishing stays tied to the job's original profile.
+- A job keeps the channel, settings, and inputs it had when queued. Later setting changes apply to new jobs, and publishing stays tied to the job's original profile.
 - Creation, configuration, and login commands default to the `default` profile when `--channel` is omitted.
 - CLI `pause` / `resume` without a channel apply globally. `--channel animals` controls that profile independently. Running work finishes before a pause takes effect.
 - `schedule_time` starts production; publishing follows completion. Missed days do not accumulate a production backlog.
 
-Use `--home /path/to/data` before the command, or set `SHORTS_HOME`, to select a different data directory. Use the same directory for every command and service instance. Legacy `config.json` files are migration archives; SQLite is the settings authority.
+Use `--home /path/to/data` before the command, or set `SHORTS_HOME`, to select a different data directory. Use the same directory for every command and service instance. Legacy `config.json` files are kept only for migration. Current settings are stored in SQLite.
 
 ## Instagram editing
 
@@ -163,8 +161,8 @@ Replace `SHORTCODE` with a real Reel or single-video post identifier:
 
 | Mode | Audio | Captions and timing |
 | --- | --- | --- |
-| `narrated` | New Korean narration; source audio muted | Based on observed content; edits accommodate measured speech duration within 0.8–1.25× playback speed |
-| `original` | Original audio at 1× speed | Korean subtitles aligned to source speech; title-only overlays for silent clips |
+| `narrated` | New Korean narration; source audio muted | Based on observed content; playback speed stays between 0.8x and 1.25x to fit the measured narration |
+| `original` | Original audio at 1x speed | Korean subtitles aligned to source speech; title-only overlays for silent clips |
 
 The full source frame fits within the vertical canvas, with blurred fill where needed. Output descriptions retain the original account and link. Supported source media is 1 second to 10 minutes long, up to 300 MiB.
 
@@ -287,7 +285,7 @@ launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/dev.shorts-local.plist
 - Completed stages are reused after interruption; invalid or partial artifacts are rejected.
 - Global and channel pauses are independent. A blocked channel does not prevent another channel's eligible job from running.
 - Ordinary failures have bounded retries. Authentication failures wait for login; quota and rate-limit failures back off.
-- Upload sessions and receipts support resumption and deduplication. An uncertain publication result is held for reconciliation rather than blindly uploaded again.
+- Upload sessions and receipts support resumption and deduplication. If the upload result is uncertain, the job waits instead of starting another upload.
 - Generation is deferred below 5 GiB of free disk space. Models, source media, and completed outputs are retained.
 - Database migrations preserve existing jobs and create backups under `data/backups/`.
 
@@ -309,7 +307,7 @@ Channel profiles ── Scheduler / source collector
 SQLite job queue
       │
       ▼
-Sequential AI worker
+Production worker
       ├── Story:     plan → speech → artwork → render
       └── Instagram: fetch → analyze → edit plan → speech* → render
       │
@@ -319,17 +317,17 @@ Media validation → local output → optional YouTube upload → notification
 * New speech is generated only in narrated mode.
 ```
 
-Heavy AI stages run in short-lived child processes, loading one model at a time. Collection and Telegram handling run alongside the production worker.
+Model stages run in short-lived child processes and load one model at a time. Collection and Telegram handling continue while a job is running.
 
 ### Default engines
 
 | Stage | Engine / model |
 | --- | --- |
-| Planning | MLX-LM · Gemma 3 12B, 4-bit |
-| Korean narration | MLX-Audio · Qwen3-TTS 0.6B, 8-bit · Sohee |
-| Transcription | MLX Whisper · Whisper large-v3-turbo |
-| Visual analysis | MLX-VLM · Qwen3-VL 4B, 4-bit |
-| Optional images | MFLUX · Z-Image Turbo, 4-bit |
+| Planning | MLX-LM, Gemma 3 12B, 4-bit |
+| Korean narration | MLX-Audio, Qwen3-TTS 0.6B, 8-bit, Sohee |
+| Transcription | MLX Whisper, Whisper large-v3-turbo |
+| Visual analysis | MLX-VLM, Qwen3-VL 4B, 4-bit |
+| Optional images | MFLUX, Z-Image Turbo, 4-bit |
 | Composition | Pillow + FFmpeg |
 | Persistence | SQLite + per-job artifacts |
 
@@ -344,7 +342,7 @@ uv sync --extra mlx --extra images --extra instagram --group dev
 .venv/bin/shorts-local work
 ```
 
-Images are generated at 576 × 1024 and composed into the final vertical video. Set `visuals cards` to use deterministic local illustrations. Character consistency and scene accuracy depend on the image model.
+Images are generated at 576 x 1024 and composed into the final vertical video. Set `visuals cards` to use deterministic local illustrations. Character consistency and scene accuracy depend on the image model.
 
 </details>
 
@@ -364,7 +362,7 @@ This integration is limited to script planning. The app requires subscription lo
 
 ## Validation
 
-Verification snapshot: **October 11, 2026**, on an M5 MacBook Air with 24 GB unified memory.
+Checked on **October 11, 2026**, on an M5 MacBook Air with 24 GB unified memory.
 
 | Check | Result |
 | --- | --- |
@@ -374,7 +372,7 @@ Verification snapshot: **October 11, 2026**, on an M5 MacBook Air with 24 GB uni
 | Story pipeline | Local planning, Korean narration, and generated images; 65.21-second output |
 | Instagram editing | 59.0-second original-audio edit and 39.7-second narrated edit from a local fixture |
 | News-card prototype | 41.17-second, five-card video; encoded narration matched the script after text normalization |
-| Media output | Verified 1080 × 1920, 30 fps, H.264/AAC, including full decode checks |
+| Media output | Verified 1080 x 1920, 30 fps, H.264/AAC, including full decode checks |
 
 The suite covers scheduling, channel isolation, recovery, duplicate commands, access control, real FFmpeg rendering, and simulated upload failures. Live-account acceptance for Instagram collection, Telegram messaging, and YouTube publishing remains pending. Media checks validate the file and timing; factual accuracy requires content review.
 
