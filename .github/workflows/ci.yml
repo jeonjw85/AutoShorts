@@ -14,10 +14,10 @@ jobs:
         with:
           python-version: "3.13"
           enable-cache: true
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg and Korean fonts
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-cjk
       - name: Install dependencies
-        run: uv sync --group dev && uv pip install --python .venv/bin/python instaloader==4.15.3
+        run: uv sync --extra mlx --extra instagram --group dev
       - name: Lint
         run: uv run --no-sync ruff check src tests
       - name: Test
