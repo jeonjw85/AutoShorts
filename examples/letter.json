@@ -1,0 +1,21 @@
+{
+  "title": "내일 도착한 편지",
+  "description": "오래된 우체통에서 시작된 짧은 창작 이야기입니다. 이 파일은 설치 검증용 예제 대본입니다.",
+  "scenes": [
+    {
+      "heading": "이상한 우체통",
+      "narration": "비가 그친 골목에서 내 이름이 적힌 편지를 발견했어요. 분명 오래전에 사라진 우체통이었는데 말이에요.",
+      "image_prompt": "A red mailbox in a quiet rain-soaked Korean alley, warm cinematic illustration, no text"
+    },
+    {
+      "heading": "내일의 날짜",
+      "narration": "봉투에 적힌 날짜는 내일이었어요. 안에는 꽃씨 하나와, 오늘 심으면 내일이 달라진다는 말이 있었죠.",
+      "image_prompt": "An open envelope and a tiny seed on a wooden table, warm golden light, cinematic illustration, no text"
+    },
+    {
+      "heading": "작은 시작",
+      "narration": "나는 빈 화분에 씨앗을 심었어요. 아직 아무것도 자라지 않았지만, 내일을 기다리는 이유가 생겼어요.",
+      "image_prompt": "A small terracotta pot by a sunny apartment window, hopeful atmosphere, warm cinematic illustration, no text"
+    }
+  ]
+}
