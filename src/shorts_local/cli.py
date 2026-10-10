@@ -62,8 +62,18 @@ def channel_add(ctx: typer.Context, channel_id: str, name: Annotated[str, typer.
                f"{p.settings.schedule_time} ({p.settings.timezone})")
 
 
+def _show_version(value: bool):
+    if value:
+        from .updates import installed_version
+
+        typer.echo(installed_version())
+        raise typer.Exit()
+
+
 @app.callback()
-def main(ctx: typer.Context, home: Annotated[Path, typer.Option(envvar="SHORTS_HOME")] = Path("data")):
+def main(ctx: typer.Context, home: Annotated[Path, typer.Option(envvar="SHORTS_HOME")] = Path("data"),
+         version: Annotated[bool, typer.Option("--version", callback=_show_version,
+                                                is_eager=True)] = False):
     ctx.obj = home.expanduser().resolve()
 
 
@@ -95,7 +105,10 @@ def doctor(ctx: typer.Context):
                 pass
         channels.append({"id": p.id, "name": p.settings.channel_name, "paused": p.paused,
                          "youtube_connected": connected, "youtube_channel_id": p.youtube_channel_id})
+    from .updates import installed_version
+
     report = {
+        "version": installed_version(),
         "platform": f"{platform.system()} {platform.machine()}",
         "python": platform.python_version(),
         "free_disk_gb": round(shutil.disk_usage(root).free / 1024**3, 1),
@@ -484,6 +497,23 @@ def reconcile(ctx: typer.Context, job_id: str, video_id: str):
     except (BusyError, BlockedError) as exc:
         raise typer.BadParameter(str(exc)) from None
     typer.echo(f"{p.label} 등록 완료: https://youtu.be/{video_id}")
+
+
+@app.command()
+def update(ctx: typer.Context):
+    """최신 GitHub 릴리즈를 확인하고, 깨끗한 checkout이면 적용합니다."""
+    from . import updates
+
+    try:
+        tag = updates.latest_tag()
+        current = updates.installed_version()
+        if updates.version_tuple(tag) <= updates.version_tuple(current):
+            typer.echo(updates.release_status(current, tag))
+            return
+        updates.apply_release(updates.project_root(), ctx.obj, tag)
+    except updates.UpdateBlocked as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"{tag}를 적용했습니다. 실행 중인 명령은 다시 시작하세요.")
 
 
 @app.command()

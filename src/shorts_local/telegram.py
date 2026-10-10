@@ -27,6 +27,7 @@ HELP = """Shorts Local · 로컬 쇼츠 제작기
 /pause all · /resume all — 전체 정지/재개
 /retry 작업ID — 실패 작업 재시도
 /upload 작업ID — 완성 영상 업로드
+/update — 새 릴리즈 확인. 파일은 바꾸지 않음
 /settings — 현재 설정
 /set topic 새 주제
 /set schedule 09:00
@@ -52,12 +53,29 @@ def handle_update(store: Store, update: dict, owner_id: int) -> dict | None:
     text = message.get("text", "").strip()
     if not text:
         return None
+    command = text.partition(" ")[0].split("@")[0].lower()
+    prepared = _release_notice() if command == "/update" else None
     with store.transaction():
         reply = store.telegram_reply(update["update_id"])
         if reply is None:
-            reply = _handle_command(store, update, text)
+            reply = {"text": f"[전체]\n{prepared}"} if prepared is not None else _handle_command(
+                store, update, text)
             store.accept_telegram(update["update_id"], reply)
         return reply
+
+
+def _release_notice() -> str:
+    from .updates import UpdateBlocked, installed_version, latest_tag, release_status, version_tuple
+
+    try:
+        tag = latest_tag()
+        current = installed_version()
+        notice = release_status(current, tag)
+    except UpdateBlocked as exc:
+        return str(exc)
+    if version_tuple(tag) > version_tuple(current):
+        return f"{notice}\nTelegram에서는 파일을 바꾸지 않습니다."
+    return notice
 
 
 def _handle_command(store: Store, update: dict, text: str) -> dict:
@@ -143,7 +161,9 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
             if selected is None:
                 label = "[전체]"
             paused = store.value("paused", False) or (selected is not None and p.paused)
-            lines = ["일시정지" if paused else "실행 가능",
+            from .updates import installed_version
+
+            lines = [f"버전: {installed_version()}", "일시정지" if paused else "실행 가능",
                      f"기획: {settings.planner} · 화면: {settings.visuals} · 추가 서비스 요금 0원"]
             for channel in store.profiles() if selected is None else [p]:
                 state = instagram.channel_state(channel.id)
