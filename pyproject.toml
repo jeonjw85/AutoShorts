@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shorts-local"
+version = "0.1.0"
+description = "Zero-service-cost, MLX-first Shorts automation for Apple Silicon"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+  "pydantic>=2.10,<3", "httpx>=0.28,<1", "pillow>=11,<13",
+  "typer>=0.15,<1", "google-auth-oauthlib>=1.2,<2", "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+mlx = ["mlx-lm==0.32.0", "mlx-audio==0.5.8", "soundfile>=0.13,<1"]
+images = ["mflux==0.22.0"]
+instagram = ["instaloader==4.15.3", "mlx-whisper==0.4.3", "mlx-vlm==0.7.6"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shorts_local"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
