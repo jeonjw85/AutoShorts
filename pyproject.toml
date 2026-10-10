@@ -22,6 +22,9 @@ instagram = ["instaloader==4.15.3", "mlx-whisper==0.4.3", "mlx-vlm==0.7.6"]
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
+[project.scripts]
+shorts-local = "shorts_local.cli:app"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/shorts_local"]
 
