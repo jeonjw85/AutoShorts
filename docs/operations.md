@@ -91,8 +91,34 @@ DB나 작업 폴더 전체를 지우면 중복 방지 기록도 사라집니다.
 - 작업 단계는 `fetch → analyze → edit-plan → speech(해설형) → render → upload`입니다. 부분 파일은 완성본으로 재사용하지 않고, 최종 `validation.json`은 입력/설정 및 영상·메타데이터·타임라인 해시를 연결합니다. 업로드 기록이 있는 완성본이 변하면 재렌더하지 않고 `blocked`로 중단합니다.
 - 해설 길이 보정은 최초 편집안·문장·실제 음성 길이를 `timing-feedback.json`에 함께 보존하고 한 번만 수행합니다. 먼저 기존 구간과 인접한 빈 구간 안에서 겹치지 않게 컷을 계산하고 측정된 음성을 재사용합니다. 이 방법으로 맞출 수 없으면 측정값을 포함해 문장을 재기획합니다. 한 번 보정한 뒤에도 속도·길이가 맞지 않으면 `blocked`로 표시합니다.
 - 원음형은 프레임 단위의 총 길이를 기획 단계에서 검증합니다. 잘못된 캐시는 재기획하고, 중간 컷의 음성은 PCM으로 보관해 AAC 인코더 지연이 누적되지 않게 합니다. 완성본만 AAC로 인코딩하며 최대 길이는 그대로 적용합니다.
-- 운영 DB는 schema 2입니다. schema 1 설치는 서비스/작업자 종료 후 `init`으로 이전합니다. `backups/pre-instagram.sqlite3`를 0600으로 먼저 보존하고 기존 `pre-channels.sqlite3`는 유지합니다. 작업 ID·설정 JSON·완성본·YouTube 대상·Telegram 이력은 보존합니다.
+- Instagram 도입 단계는 schema 2이며, 현재 앱은 뉴스 저장소를 포함하는 schema 3으로 이전합니다. schema 1 설치는 서비스/작업자 종료 후 `init`으로 이전합니다. `backups/pre-instagram.sqlite3`를 0600으로 먼저 보존하고 기존 `pre-channels.sqlite3`는 유지합니다. 작업 ID·설정 JSON·완성본·YouTube 대상·Telegram 이력은 보존합니다.
 - 이전 실패 시 같은 `init`을 다시 실행하세요. 백업 복원은 서비스를 종료하고 DB·작업 폴더의 현 상태를 별도 보관한 뒤 수행합니다. 과거 DB만 되돌리면 그 이후의 중복 방지/게시 이력을 잃을 수 있습니다.
+
+### 뉴스 기사·RSS·이전
+
+```bash
+.venv/bin/shorts-local channel add news --name "뉴스 한 컷"
+.venv/bin/shorts-local config --channel news production_type news
+.venv/bin/shorts-local news-source add 'https://example.com/feed.xml' --channel news
+.venv/bin/shorts-local news-source scan --channel news
+.venv/bin/shorts-local import-article 'https://example.com/story' --channel news --local-only
+.venv/bin/shorts-local create --channel news --type news --local-only
+.venv/bin/shorts-local work
+```
+
+- 예시 주소는 실제 기사/RSS 주소로 바꿉니다. 기사 링크는 즉시 등록하고, RSS 2.0/Atom은 등록 이후 게시된 항목만 자동 소재로 저장합니다. 같은 채널의 정규 기사 주소는 작업 하나에 연결합니다. 실패·건너뜀 소재를 자동으로 다시 풀지 않습니다.
+- 예약 시각에 가장 오래된 미사용 글 하나만 선택합니다. 소재가 없으면 기다립니다. `import-article`과 명시적 `create --type news`는 채널 기본 설정이나 당일 예약 키를 바꾸지 않습니다.
+- `news-source list/pause/resume`으로 피드를 관리합니다. 기본 확인 간격은 60분이며 `news_poll_minutes`는 15~1440분입니다. 수집 한 번은 최대 120초·200항목이고, 실패하면 5분~6시간 대기합니다. 같은 장애 알림은 복구 전까지 한 번만 전송합니다.
+- Telegram `/article URL`, `/news_add FEED_URL`, `/news_sources`, `/news_pause ID`, `/news_resume ID`, `/news_scan`, `/set type news`를 지원합니다. `/news_scan`은 확인 예약만 저장합니다. DNS 조회와 다운로드는 명령 트랜잭션 밖의 작업자에서 실행합니다. 느린 피드 조회 중에도 `/pause`를 처리합니다.
+- HTML은 최대 5MiB, 대표 이미지는 최대 12MiB입니다. 기사 가져오기 프로세스는 30초로 제한합니다. 추출 완료 후 이미지가 실패하면 저장된 본문으로 글자 카드를 만듭니다. 비공개 주소와 잘못된 리다이렉트는 연결 전에 거절합니다.
+- 본문 400자 미만 또는 페이지/RSS 게시 날짜가 모두 없으면 소재는 `unsupported`, 작업은 `blocked`로 남습니다. 페이지 날짜를 RSS 날짜보다 우선하며 오늘 날짜로 채우지 않습니다. 동적 페이지·유료벽·언론사별 HTML 구조는 추출을 막을 수 있습니다.
+- 페이지의 공용 시계·수정 날짜·본문 속 행사 날짜는 게시 날짜로 쓰지 않습니다. 게시용 메타데이터나 기사 헤더 시각을 확인할 수 없으면 RSS 날짜를 사용합니다. 일시적 DNS 오류는 소재를 거절하지 않고 기존 최대 3회 네트워크 재시도를 적용합니다.
+- RSS 항목의 게시 시각은 조회 완료 시각을 기준으로 판정합니다. 아직 미래 시각인 항목이 남으면 ETag/Last-Modified를 저장하지 않아 다음 조회에서 다시 확인할 수 있게 합니다. 디스크 여유가 5GiB 미만이면 RSS 다운로드도 보류합니다.
+- `news_style`은 말투 지침입니다. 본문 인용·숫자 검사 후 별도 로컬 기획 호출로 인물·결과·부정 표현을 대조합니다. 한 번 보정한 대본도 거절되면 `blocked`입니다. 같은 입력·설정으로 `retry`해도 검증 기회를 무한히 늘리지 않습니다. 입력 검증은 기사 자체의 사실 여부나 여러 출처의 일치를 보증하지 않습니다.
+- 작업 폴더의 `article.json`과 `news-plan.json`은 입력 키가 있는 캐시입니다. 본문 해시·설정이 달라지면 기획을 다시 검증합니다. 음성은 문장·모델·목소리별로 재사용합니다. 최종 `validation.json`은 영상·메타데이터·타임라인을 연결하며, 일치하면 기사 재다운로드나 모델 없이 게시 복구합니다. 업로드를 시작한 파일이 바뀌면 재렌더하지 않고 보류합니다.
+- schema 2에서 schema 3으로 이전하기 전에 `backups/pre-news.sqlite3`를 0600으로 만듭니다. 기존 이야기/Instagram 작업 입력, 설정, 파일, YouTube 대상, 알림, Telegram 수신 이력과 이전 백업을 그대로 보존합니다. 운영 DB 이전은 `serve`/`work` 종료 후 `init`으로 진행합니다.
+- 뉴스 전용 기본 설정은 기존 Instagram 완성 기록의 입력 키에 포함하지 않습니다. 이전 버전에서 완성했거나 업로드를 시작한 Instagram 영상도 원래 파일로 복구합니다.
+- 가짜 HTTP와 실제 SQLite/FFmpeg로 수집·카드·복구를 검증합니다. 실제 기사와 로컬 모델을 함께 사용하는 실행은 별도 확인 대상이며, fixture 성공을 모든 언론사 지원으로 해석하지 않습니다.
 
 ### 메모리와 저장 공간
 
@@ -126,7 +152,7 @@ RSS와 macOS footprint는 다른 지표이며, 위 값은 순차 실행한 개�
 - 한국어 원본 전사는 공백·문장부호를 제외한 241글자가 대본과 일치했습니다. 시각 모델은 원본에 이미 삽입된 글자 일부를 잘못 읽거나 문장을 끊었습니다. 이 샘플의 성공이 장면 설명 전반의 정확도를 보장하지는 않습니다.
 - 결과와 동기 측정: `.omo/sdd/instagram-import-editing/measurement-accepted/acceptance-results.json`, `audio-sync.json`. 초기 실패와 수정 과정도 같은 실행 디렉터리에 보존합니다.
 
-최종 회귀 검사는 **218개 통과**, Ruff·잠금 파일 확인·wheel/sdist 빌드 통과입니다. Python 3.13에서 고정된 Instaloader가 내는 `utcfromtimestamp` 폐기 예정 경고 1건이 남아 있습니다.
+당시 회귀 검사는 **218개 통과**, Ruff·잠금 파일 확인·wheel/sdist 빌드 통과입니다. Python 3.13에서 고정된 Instaloader가 내는 `utcfromtimestamp` 폐기 예정 경고 1건이 남아 있습니다.
 
 ## 한글 자막·음성
 
