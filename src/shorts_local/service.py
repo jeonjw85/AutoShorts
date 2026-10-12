@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from .collector import run_collection
 from .config import initialize
+from .news_collector import run_news_collection
 from .pipeline import run_next
 from .process import BusyError, exclusive_lock
 from .store import Store
@@ -37,6 +38,11 @@ def schedule_due(store: Store, channel_id: str = "default", now: datetime | None
 
             return InstagramStore(store).enqueue_next(
                 channel_id=channel_id, key=f"schedule:{now.date().isoformat()}")
+        if settings.production_type == "news":
+            from .news_store import NewsStore
+
+            return NewsStore(store).enqueue_next(
+                channel_id=channel_id, key=f"schedule:{now.date().isoformat()}")
         return store.enqueue(channel_id=channel_id, key=f"schedule:{now.date().isoformat()}")
 
 
@@ -62,8 +68,9 @@ def serve(root: Path, stop_event=None):
     auth = credentials(root)
     bot = Telegram(*auth) if auth else None
     with (exclusive_lock(root / "service.lock"), ThreadPoolExecutor(max_workers=1) as pool,
-          ThreadPoolExecutor(max_workers=1) as collector_pool):
-        future, collection = None, None
+          ThreadPoolExecutor(max_workers=1) as collector_pool,
+          ThreadPoolExecutor(max_workers=1) as news_pool):
+        future, collection, news_collection = None, None, None
         try:
             while stop_event is None or not stop_event.is_set():
                 for profile in store.profiles():
@@ -84,6 +91,13 @@ def serve(root: Path, stop_event=None):
                         except Exception as exc:
                             logger.error("수집 실행 오류: %s", type(exc).__name__)
                     collection = collector_pool.submit(run_collection, root)
+                if news_collection is None or news_collection.done():
+                    if news_collection:
+                        try:
+                            news_collection.result()
+                        except Exception as exc:
+                            logger.error("뉴스 수집 실행 오류: %s", type(exc).__name__)
+                    news_collection = news_pool.submit(run_news_collection, root)
                 if bot:
                     try:
                         process_telegram(store, bot)
