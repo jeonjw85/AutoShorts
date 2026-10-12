@@ -90,6 +90,28 @@ def _upgrade_instagram(db: sqlite3.Connection, root: Path) -> None:
         db.execute("PRAGMA user_version=2")
 
 
+def _upgrade_news(db: sqlite3.Connection, root: Path) -> None:
+    _backup(db, root, "pre-news.sqlite3")
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("""CREATE TABLE news_sources (
+            id TEXT PRIMARY KEY, channel_id TEXT NOT NULL REFERENCES channels(id),
+            feed_url TEXT NOT NULL, site_name TEXT, active INTEGER NOT NULL DEFAULT 1,
+            registered_at REAL NOT NULL, next_run REAL NOT NULL DEFAULT 0,
+            last_success REAL, error TEXT, etag TEXT, last_modified TEXT,
+            status TEXT NOT NULL DEFAULT 'pending', failure_count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(channel_id,feed_url)
+        )""")
+        db.execute("""CREATE TABLE news_items (
+            id TEXT PRIMARY KEY, channel_id TEXT NOT NULL REFERENCES channels(id),
+            source_id TEXT REFERENCES news_sources(id), canonical_url TEXT NOT NULL,
+            title TEXT, published_at REAL, discovered_at REAL NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('available','reserved','unsupported','unavailable')),
+            reason TEXT, job_id TEXT UNIQUE REFERENCES jobs(id), UNIQUE(channel_id,canonical_url)
+        )""")
+        db.execute("PRAGMA user_version=3")
+
+
 def ensure_database(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.chmod(0o700)
@@ -97,19 +119,22 @@ def ensure_database(root: Path) -> None:
     with closing(sqlite3.connect(path, timeout=15)) as db:
         path.chmod(0o600)
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        if version == 2:
+        if version == 3:
             return
-        if version > 2:
+        if version > 3:
             raise BlockedError("더 새로운 DB 형식입니다. 프로그램을 업데이트하세요.")
         with (exclusive_lock(root / "migration.lock"), exclusive_lock(root / "service.lock"),
               exclusive_lock(root / "worker.lock")):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version == 2:
+            if version == 3:
                 return
-            if version > 2:
+            if version > 3:
                 raise BlockedError("더 새로운 DB 형식입니다. 프로그램을 업데이트하세요.")
             if version == 1:
                 _upgrade_instagram(db, root)
+                version = 2
+            if version == 2:
+                _upgrade_news(db, root)
                 return
             old = db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone()
             settings = Settings.load(root / "config.json")
@@ -152,3 +177,4 @@ def ensure_database(root: Path) -> None:
                 )""")
                 db.execute("PRAGMA user_version=1")
             _upgrade_instagram(db, root)
+            _upgrade_news(db, root)
