@@ -1,29 +1,29 @@
-# 운영·복구 가이드
+# Operations and recovery guide
 
-## 실행 상태
+## Job states
 
-`queued → running → ready` 또는 `uploaded`가 정상 경로입니다.
+Jobs normally move from `queued` to `running`, then to `ready` or `uploaded`.
 
-| 상태 | 의미 | 조치 |
+| State | Meaning | Action |
 | --- | --- | --- |
-| queued | 큐 대기 | `work` 또는 `serve` |
-| running | 단계 실행 중 | 작업 폴더의 로그 확인 |
-| retry | 일시적 오류/한도 대기 | 데몬이 대기 시간 후 재시도 |
-| auth_wait | Instagram 인증 대기, 시도 횟수 보존 | 로컬 `instagram-login 계정명` 성공 후 자동 복원 |
-| ready | 로컬 완성 | 미리보기 또는 `publish 작업ID` |
-| uploaded | 영상 ID 저장 완료 | YouTube 링크 확인 |
-| blocked | 인증·설치·공간·불확실한 업로드 | 원인 해결 후 `retry 작업ID` |
-| failed | 3회 실패 | 로그 확인 후 수동 재시도 |
-| skipped | 이전 날짜의 미완성 예약 제작 | 당일 예약 작업이 대신 실행됨 |
+| queued | Waiting in the queue | Run `work` or `serve` |
+| running | A processing step is running | Check the logs in the job folder |
+| retry | Waiting after a temporary error or quota limit | The daemon retries after the wait period |
+| auth_wait | Waiting for Instagram authentication without using a retry attempt | Automatically requeued after a successful local `instagram-login USERNAME` |
+| ready | Local output is complete | Preview it or run `publish JOB_ID` |
+| uploaded | The video ID has been saved | Check the YouTube link |
+| blocked | Authentication, installation, disk space, or an uncertain upload result needs attention | Fix the cause, then run `retry JOB_ID` |
+| failed | Failed three times | Check the logs and retry manually |
+| skipped | An unfinished scheduled job from a previous day | Today's scheduled job runs instead |
 
-`pause`는 현재 제작을 강제 종료하지 않고 다음 작업부터 멈춥니다. 터미널의 `serve`를 Ctrl+C로 종료해도 현재 작업을 마친 후 종료합니다.
-CLI의 인자 없는 `pause`/`resume`은 전체, `--channel animals`는 해당 채널에 적용됩니다. 전체 정지와 개별 정지는 별도이며 둘 다 해제되어야 실행됩니다. 한 채널의 작업 오류는 다른 채널의 다음 작업을 막지 않습니다.
-프로세스가 강제 종료되면 감독 프로세스가 남은 생성 프로세스를 종료하고, 종료가 끝날 때까지 작업 잠금을 유지합니다. 다음 실행이 남은 작업을 회수합니다. 3회 이상 강제 중단된 작업은 자동 반복하지 않습니다.
-여러 날 중단된 경우 이전 날짜의 미완성 예약 제작은 건너뜁니다. 이미 업로드를 시작한 작업의 세션·영수증은 보존하고 결과 확인을 이어갑니다. 수동으로 등록한 작업과 명시적으로 `retry`·`publish`한 작업은 날짜가 지났다는 이유로 건너뛰지 않습니다.
+`pause` lets the current job finish and stops before the next one. Pressing Ctrl+C while `serve` is running in a terminal also waits for the current job to finish before exiting.
+In the CLI, `pause` and `resume` without arguments apply globally; add `--channel animals` to target that channel. Global and channel pauses are independent, and both must be cleared before jobs can run. A job error on one channel does not prevent the next job on another channel from running.
+If a process is forcibly terminated, the supervisor stops any remaining generation processes and holds the job lock until they exit. The next run recovers unfinished jobs. Jobs forcibly interrupted three or more times are not retried automatically.
+After an interruption lasting several days, unfinished scheduled jobs from previous days are skipped. Sessions and receipts for jobs that have already started uploading are preserved, and the app continues checking their results. Manually queued jobs and jobs explicitly requested with `retry` or `publish` are not skipped just because their date has passed.
 
-## 자주 필요한 명령
+## Common commands
 
-프로젝트 폴더에서 `.venv/bin/shorts-local`을 사용하면 현재 설치된 선택 의존성을 그대로 사용합니다.
+Run `.venv/bin/shorts-local` from the project folder to use the optional dependencies already installed in the environment.
 
 ```bash
 .venv/bin/shorts-local status
@@ -32,72 +32,72 @@ CLI의 인자 없는 `pause`/`resume`은 전체, `--channel animals`는 해당 �
 .venv/bin/shorts-local pause --channel animals
 .venv/bin/shorts-local pause
 .venv/bin/shorts-local resume
-.venv/bin/shorts-local retry 작업ID
+.venv/bin/shorts-local retry JOB_ID
 .venv/bin/shorts-local work
 .venv/bin/shorts-local --version
 .venv/bin/shorts-local update
 ```
 
-`update`는 GitHub 최신 릴리즈를 확인합니다. 이 저장소의 깨끗한 checkout이고 `serve`가 멈춰 있을 때만 태그를 받아 현재 설치된 옵션으로 `uv sync`합니다. 로컬 수정이나 실행 중인 서비스가 있으면 멈추고 이유만 알려줍니다. Telegram `/update`는 확인만 합니다.
+`update` checks the latest GitHub release. It fetches the release tag and runs `uv sync` with the currently installed extras only when this repository's checkout is clean and `serve` is stopped. If there are local changes or a running service, it stops and reports the reason. Telegram's `/update` only checks for updates.
 
-## 업로드 중 네트워크가 끊긴 경우
+## Interrupted uploads
 
-`upload-state.json`은 비밀인 세션 URL·파일 해시·대상 채널을 담습니다. 앱이 이 세션의 서버 상태를 조회해 이어서 보냅니다.
-`upload-receipt.json`이 있으면 같은 파일을 다시 업로드하지 않습니다. 세션 URL은 공유하지 마세요.
+`upload-state.json` contains a secret session URL, the file hash, and the target channel. The app queries the server for the session's status and resumes the upload.
+If `upload-receipt.json` exists, the same file is not uploaded again. Do not share the session URL.
 
-세션이 만료되어 결과를 확인할 수 없으면 작업이 `blocked`가 됩니다.
+If the session expires and the result cannot be confirmed, the job becomes `blocked`.
 
-1. YouTube Studio에서 해당 제목과 제작 시각으로 실제 업로드 여부를 확인합니다.
-2. 영상이 있다면 11자리 ID를 가져와 아래 명령으로 연결합니다.
+1. Check YouTube Studio for the video's title and creation time to determine whether it was uploaded.
+2. If the video exists, copy its 11-character ID and associate it with the job using the command below.
 
-작업의 원래 채널 프로필이 연결되어 있어야 합니다. 이 명령과 `publish`/`retry`는 작업에 고정된 채널을 사용하며 현재 Telegram 선택에 영향받지 않습니다.
+The job's original channel profile must be connected. This command, along with `publish` and `retry`, uses the channel assigned to the job, regardless of the current Telegram selection.
 
 ```bash
-.venv/bin/shorts-local reconcile 작업ID 영상ID
+.venv/bin/shorts-local reconcile JOB_ID VIDEO_ID
 ```
 
-3. **영상이 없음을 직접 확인했을 때만**, 중지 상태에서 해당 작업의 `upload-state.json`을 다른 이름으로 보관한 뒤 재시도하세요. 앱은 이 삭제를 자동으로 하지 않습니다.
+3. Only after you have personally confirmed that the video does not exist, stop the service, rename the job's `upload-state.json` to keep a backup, and retry. The app does not remove this file automatically.
 
-DB나 작업 폴더 전체를 지우면 중복 방지 기록도 사라집니다. 설정·DB·작업 폴더를 함께 보관하세요.
+Deleting the database or the entire job folder also removes the records used to prevent duplicate uploads. Keep the settings, database, and job folders together.
 
-## 인증
+## Authentication
 
-- YouTube: `youtube-login /경로/client_secret.json --channel animals`로 해당 프로필을 재연결합니다. 업로드·읽기 권한을 사용해 실제 채널 ID를 확인하고 동일 대상만 재인증합니다.
-- 일시적인 인증 서버/네트워크 오류는 자동 재시도하고, 폐기되거나 만료된 갱신 자격증명은 다시 연결해야 합니다.
-- 연결했던 채널의 인증 JSON이 손상된 경우에도 같은 YouTube 채널로 재로그인하면 복구합니다. 손상된 원본은 같은 인증 폴더의 `youtube.damaged-*.json`에 0600 권한으로 보관합니다. 기존 채널 ID를 확인할 수 없는 미연결 프로필이나 다른 대상의 인증은 자동 교체하지 않습니다.
-- Telegram: 토큰을 재발급받았다면 `telegram-setup` 후 데몬을 재시작합니다.
-- Codex: 실제 실행되는 CLI의 `codex login status`가 ChatGPT 로그인이어야 합니다. PATH의 래퍼만 존재하고 실제 CLI가 없으면 사용할 수 없습니다.
-- `data/auth/`, `data/channels/*/auth/`와 `upload-state.json`은 공유하거나 저장소에 추가하지 않습니다. 자격증명 파일은 0600 권한으로 저장됩니다.
+- YouTube: Reconnect the profile with `youtube-login /path/to/client_secret.json --channel animals`. Upload and read permissions are used to verify the actual channel ID, and reauthentication is allowed only for the same target.
+- Temporary authentication server or network errors are retried automatically. Revoked or expired refresh credentials require you to reconnect.
+- If a connected channel's authentication JSON is damaged, signing in again to the same YouTube channel recovers it. The damaged original is saved as `youtube.damaged-*.json` in the same authentication folder with 0600 permissions. Credentials are not automatically replaced for an unconnected profile whose previous channel ID cannot be verified, or for a different target channel.
+- Telegram: After replacing the token, run `telegram-setup` and restart the daemon.
+- Codex: `codex login status` for the CLI that actually runs must show a ChatGPT login. A wrapper on PATH without the actual CLI is not sufficient.
+- Do not share or commit `data/auth/`, `data/channels/*/auth/`, or `upload-state.json`. Credential files are saved with 0600 permissions.
 
-## 다중 채널 이전
+## Migrating to multiple channels
 
-1. 실행 중인 기존 `serve`/`work`가 끝난 뒤 `.venv/bin/shorts-local init`을 실행합니다. 앱은 기존 서비스·작업자 잠금을 획득할 수 있을 때만 이전합니다.
-2. 기존 DB를 `data/backups/pre-channels.sqlite3`에 백업하고 설정·작업을 `default` 프로필에 연결합니다. 작업 ID, 완성 파일, 재시도/알림/Telegram 수신 기록은 보존합니다.
-3. 기존 OAuth 파일은 원본을 보존하면서 `data/channels/default/auth/youtube.json`으로 복사합니다. 이전 도중 중단되면 같은 명령을 다시 실행하세요. 충돌 파일은 자동 덮어쓰지 않습니다.
-4. 이후 설정은 SQLite가 원본입니다. `config`/`/set`을 사용하고 보관된 `config.json`을 편집해 적용하려 하지 마세요.
+1. Wait for any existing `serve` or `work` process to finish, then run `.venv/bin/shorts-local init`. Migration runs only when the app can acquire the existing service and worker locks.
+2. The app backs up the existing database to `data/backups/pre-channels.sqlite3` and associates settings and jobs with the `default` profile. Job IDs, completed files, retry records, notifications, and Telegram receive history are preserved.
+3. The existing OAuth file is copied to `data/channels/default/auth/youtube.json`, leaving the original intact. If migration is interrupted, run the same command again. Conflicting files are not overwritten automatically.
+4. After migration, SQLite is the source of truth for settings. Use `config` or `/set`; editing the archived `config.json` does not apply changes.
 
-기존 업로드 전용 OAuth에 읽기 권한이 없다면 해당 프로필로 다시 로그인해야 합니다. 대상 정보 없는 구버전 완료 영수증은 이전 작업에서만 읽어 중복 게시를 방지합니다. 구버전 진행 중 세션은 보존된 **원래 인증으로 대상이 확인된 경우에만** 재개하며, 새 로그인만으로 과거 대상을 추정하지 않습니다. 원래 인증으로 확인할 수 없으면 위 Studio 확인·`reconcile` 절차를 사용하세요.
-다중 채널이 Google 프로젝트의 공유 할당량을 늘리지는 않습니다. 공유 한도 소진 시 여러 채널의 업로드가 함께 대기할 수 있고 다른 로컬 제작은 계속됩니다.
+If the existing upload-only OAuth credentials lack read permissions, sign in again for that profile. Legacy completion receipts without target information are read only for migrated jobs to prevent duplicate publishing. Legacy in-progress sessions resume only when the target can be verified using the preserved original credentials. A new login alone is not used to infer the previous target. If the original credentials cannot verify it, follow the Studio check and `reconcile` procedure above.
+Using multiple channels does not increase the Google project's shared quota. When that quota is exhausted, uploads for several channels may wait together while other local production continues.
 
-## 모델·디스크·열 관리
+## Models, disk space, and thermal management
 
-### 인스타그램 수집·인증·이전
+### Instagram collection, authentication, and migration
 
-- 수집은 공용 AI 작업자와 별도로 실행되며 계정 하나당 최대 120초·200항목입니다. 미완료 페이지는 기본 5분 뒤 이어서 확인합니다. 일시 오류는 5분~6시간 지수 대기, 요청 제한은 명시된 시간 또는 최소 1시간 대기합니다.
-- `source scan`과 Telegram `/source_scan`은 전체·채널·수집원 정지와 공용 서버 대기를 우회하지 않습니다. Telegram 명령은 수집을 예약하고 즉시 응답합니다.
-- `auth_wait`는 시도 횟수를 소비하지 않습니다. `instagram-login 계정명`으로 재연결하면 자동으로 큐에 복원하고 기존 날짜/정지 규칙을 적용합니다. 수동 `retry`는 날짜 건너뛰기를 해제하지만 인증 문제 자체를 해결하지는 않습니다.
-- 새 세션 파일 저장 후 DB 반영이 중단되어도 다음 서비스/작업 실행에서 복구합니다. 기존 작업의 mode/style/source는 등록 당시 값이며 현재 채널 설정으로 바꾸지 않습니다.
-- 소재가 없는 날에는 `status`/`materials`에 소재 대기로 표시합니다. 같은 장애 알림은 상태가 지속되는 동안 억제됩니다. 미지원 사진/묶음 게시물·접근 불가 소재는 사유를 남기고 자동 재선택하지 않습니다.
-- 작업 단계는 `fetch → analyze → edit-plan → speech(해설형) → render → upload`입니다. 부분 파일은 완성본으로 재사용하지 않고, 최종 `validation.json`은 입력/설정 및 영상·메타데이터·타임라인 해시를 연결합니다. 업로드 기록이 있는 완성본이 변하면 재렌더하지 않고 `blocked`로 중단합니다.
-- 해설 길이 보정은 최초 편집안·문장·실제 음성 길이를 `timing-feedback.json`에 함께 보존하고 한 번만 수행합니다. 먼저 기존 구간과 인접한 빈 구간 안에서 겹치지 않게 컷을 계산하고 측정된 음성을 재사용합니다. 이 방법으로 맞출 수 없으면 측정값을 포함해 문장을 재기획합니다. 한 번 보정한 뒤에도 속도·길이가 맞지 않으면 `blocked`로 표시합니다.
-- 원음형은 프레임 단위의 총 길이를 기획 단계에서 검증합니다. 잘못된 캐시는 재기획하고, 중간 컷의 음성은 PCM으로 보관해 AAC 인코더 지연이 누적되지 않게 합니다. 완성본만 AAC로 인코딩하며 최대 길이는 그대로 적용합니다.
-- Instagram 도입 단계는 schema 2이며, 현재 앱은 뉴스 저장소를 포함하는 schema 3으로 이전합니다. schema 1 설치는 서비스/작업자 종료 후 `init`으로 이전합니다. `backups/pre-instagram.sqlite3`를 0600으로 먼저 보존하고 기존 `pre-channels.sqlite3`는 유지합니다. 작업 ID·설정 JSON·완성본·YouTube 대상·Telegram 이력은 보존합니다.
-- 이전 실패 시 같은 `init`을 다시 실행하세요. 백업 복원은 서비스를 종료하고 DB·작업 폴더의 현 상태를 별도 보관한 뒤 수행합니다. 과거 DB만 되돌리면 그 이후의 중복 방지/게시 이력을 잃을 수 있습니다.
+- Collection runs separately from the shared AI worker, with limits of 120 seconds and 200 items per account. Incomplete pages are checked again after five minutes by default. Temporary errors use exponential backoff from five minutes to six hours. Rate limits wait for the specified duration, or at least one hour.
+- `source scan` and Telegram's `/source_scan` respect global, channel, and source pauses, as well as shared server backoff. The Telegram command schedules collection and responds immediately.
+- `auth_wait` does not use a retry attempt. Reconnecting with `instagram-login USERNAME` automatically requeues affected jobs under the existing date and pause rules. A manual `retry` overrides date-based skipping but does not resolve the authentication problem itself.
+- If the database update is interrupted after a new session file is saved, the next service or worker run recovers it. Existing jobs retain the mode, style, and source values set when they were created, rather than taking the current channel settings.
+- On days without available source material, `status` and `materials` show that the app is waiting for material. Repeated alerts for the same problem are suppressed while it persists. Unsupported photo or carousel posts and inaccessible material are recorded with a reason and are not automatically selected again.
+- The job steps are `fetch`, `analyze`, `edit-plan`, `speech` (narrated videos only), `render`, and `upload`, in that order. Partial files are not reused as completed output. The final `validation.json` ties the inputs and settings to hashes of the video, metadata, and timeline. If completed output with an upload record changes, the job stops as `blocked` instead of rendering again.
+- Narration timing is adjusted at most once. The original edit plan, sentences, and measured speech durations are kept together in `timing-feedback.json`. The app first calculates non-overlapping cuts within the existing segments and adjacent gaps, reusing the measured speech. If that cannot fit, it replans the sentences using the measured durations. If speed or duration is still out of range after the adjustment, the job becomes `blocked`.
+- For original-audio videos, total duration is validated to the frame during planning. Invalid cached plans are regenerated. Audio for intermediate cuts is kept as PCM to avoid accumulating AAC encoder delay. Only the final output is encoded as AAC, and the maximum duration still applies.
+- Instagram support was introduced in schema 2. The current app migrates to schema 3, which includes news storage. For schema 1 installations, stop the service and workers, then run `init` to migrate. The app first creates `backups/pre-instagram.sqlite3` with 0600 permissions and keeps the existing `pre-channels.sqlite3`. Job IDs, settings JSON, completed output, YouTube targets, and Telegram history are preserved.
+- If migration fails, run `init` again. Before restoring a backup, stop the service and save separate copies of the current database and job folders. Restoring only an older database can lose duplicate-prevention and publishing records created since that backup.
 
-### 뉴스 기사·RSS·이전
+### News articles, RSS, and migration
 
 ```bash
-.venv/bin/shorts-local channel add news --name "뉴스 한 컷"
+.venv/bin/shorts-local channel add news --name "News Snapshot"
 .venv/bin/shorts-local config --channel news production_type news
 .venv/bin/shorts-local news-source add 'https://example.com/feed.xml' --channel news
 .venv/bin/shorts-local news-source scan --channel news
@@ -106,66 +106,66 @@ DB나 작업 폴더 전체를 지우면 중복 방지 기록도 사라집니다.
 .venv/bin/shorts-local work
 ```
 
-- 예시 주소는 실제 기사/RSS 주소로 바꿉니다. 기사 링크는 즉시 등록하고, RSS 2.0/Atom은 등록 이후 게시된 항목만 자동 소재로 저장합니다. 같은 채널의 정규 기사 주소는 작업 하나에 연결합니다. 실패·건너뜀 소재를 자동으로 다시 풀지 않습니다.
-- 예약 시각에 가장 오래된 미사용 글 하나만 선택합니다. 소재가 없으면 기다립니다. `import-article`과 명시적 `create --type news`는 채널 기본 설정이나 당일 예약 키를 바꾸지 않습니다.
-- `news-source list/pause/resume`으로 피드를 관리합니다. 기본 확인 간격은 60분이며 `news_poll_minutes`는 15~1440분입니다. 수집 한 번은 최대 120초·200항목이고, 실패하면 5분~6시간 대기합니다. 같은 장애 알림은 복구 전까지 한 번만 전송합니다.
-- Telegram `/article URL`, `/news_add FEED_URL`, `/news_sources`, `/news_pause ID`, `/news_resume ID`, `/news_scan`, `/set type news`를 지원합니다. `/news_scan`은 확인 예약만 저장합니다. DNS 조회와 다운로드는 명령 트랜잭션 밖의 작업자에서 실행합니다. 느린 피드 조회 중에도 `/pause`를 처리합니다.
-- HTML은 최대 5MiB, 대표 이미지는 최대 12MiB입니다. 기사 가져오기 프로세스는 30초로 제한합니다. 추출 완료 후 이미지가 실패하면 저장된 본문으로 글자 카드를 만듭니다. 비공개 주소와 잘못된 리다이렉트는 연결 전에 거절합니다.
-- 본문 400자 미만 또는 페이지/RSS 게시 날짜가 모두 없으면 소재는 `unsupported`, 작업은 `blocked`로 남습니다. 페이지 날짜를 RSS 날짜보다 우선하며 오늘 날짜로 채우지 않습니다. 동적 페이지·유료벽·언론사별 HTML 구조는 추출을 막을 수 있습니다.
-- 페이지의 공용 시계·수정 날짜·본문 속 행사 날짜는 게시 날짜로 쓰지 않습니다. 게시용 메타데이터나 기사 헤더 시각을 확인할 수 없으면 RSS 날짜를 사용합니다. 일시적 DNS 오류는 소재를 거절하지 않고 기존 최대 3회 네트워크 재시도를 적용합니다.
-- RSS 항목의 게시 시각은 조회 완료 시각을 기준으로 판정합니다. 아직 미래 시각인 항목이 남으면 ETag/Last-Modified를 저장하지 않아 다음 조회에서 다시 확인할 수 있게 합니다. 디스크 여유가 5GiB 미만이면 RSS 다운로드도 보류합니다.
-- `news_style`은 말투 지침입니다. 본문 인용·숫자 검사 후 별도 로컬 기획 호출로 인물·결과·부정 표현을 대조합니다. 한 번 보정한 대본도 거절되면 `blocked`입니다. 같은 입력·설정으로 `retry`해도 검증 기회를 무한히 늘리지 않습니다. 입력 검증은 기사 자체의 사실 여부나 여러 출처의 일치를 보증하지 않습니다.
-- 작업 폴더의 `article.json`과 `news-plan.json`은 입력 키가 있는 캐시입니다. 본문 해시·설정이 달라지면 기획을 다시 검증합니다. 음성은 문장·모델·목소리별로 재사용합니다. 최종 `validation.json`은 영상·메타데이터·타임라인을 연결하며, 일치하면 기사 재다운로드나 모델 없이 게시 복구합니다. 업로드를 시작한 파일이 바뀌면 재렌더하지 않고 보류합니다.
-- schema 2에서 schema 3으로 이전하기 전에 `backups/pre-news.sqlite3`를 0600으로 만듭니다. 기존 이야기/Instagram 작업 입력, 설정, 파일, YouTube 대상, 알림, Telegram 수신 이력과 이전 백업을 그대로 보존합니다. 운영 DB 이전은 `serve`/`work` 종료 후 `init`으로 진행합니다.
-- 뉴스 전용 기본 설정은 기존 Instagram 완성 기록의 입력 키에 포함하지 않습니다. 이전 버전에서 완성했거나 업로드를 시작한 Instagram 영상도 원래 파일로 복구합니다.
-- 가짜 HTTP와 실제 SQLite/FFmpeg로 수집·카드·복구를 검증합니다. 실제 기사와 로컬 모델을 함께 사용하는 실행은 별도 확인 대상이며, fixture 성공을 모든 언론사 지원으로 해석하지 않습니다.
+- Replace the example URLs with real article or RSS URLs. Article links are registered immediately. RSS 2.0 and Atom feeds automatically save only items published after the feed was registered as source material. Each canonical article URL is associated with one job per channel. Failed or skipped material is not automatically made available again.
+- At the scheduled time, the app selects only the oldest unused article. If no material is available, it waits. `import-article` and an explicit `create --type news` do not change the channel defaults or the scheduling key for that day.
+- Manage feeds with `news-source list/pause/resume`. The default polling interval is 60 minutes, and `news_poll_minutes` accepts values from 15 to 1440 minutes. Each collection run is limited to 120 seconds and 200 items. Failures trigger a wait of five minutes to six hours. The same failure alert is sent only once until recovery.
+- Telegram supports `/article URL`, `/news_add FEED_URL`, `/news_sources`, `/news_pause ID`, `/news_resume ID`, `/news_scan`, and `/set type news`. `/news_scan` only schedules a check. DNS lookups and downloads run in a worker outside the command transaction, so `/pause` can still be processed during a slow feed request.
+- HTML is limited to 5 MiB and the featured image to 12 MiB. The article-fetching process has a 30-second limit. If image retrieval fails after text extraction succeeds, the app creates text cards from the saved article body. Private addresses and invalid redirects are rejected before connecting.
+- If the body has fewer than 400 characters, or neither the page nor RSS provides a publication date, the material remains `unsupported` and the job stays `blocked`. The page date takes precedence over the RSS date; today's date is never used as a substitute. Dynamic pages, paywalls, and publisher-specific HTML can prevent extraction.
+- Site-wide clocks, modification dates, and event dates in the article body are not treated as publication dates. If publication metadata or an article-header timestamp cannot be verified, the RSS date is used. Temporary DNS errors use the existing network retry policy of up to three attempts rather than rejecting the material.
+- RSS publication times are evaluated against the time the fetch completes. If any items are still dated in the future, ETag and Last-Modified values are not saved, allowing those items to be checked again on the next fetch. RSS downloads are also deferred when free disk space is below 5 GiB.
+- `news_style` provides tone guidance. After checking quotations and numbers against the article body, a separate local planning call cross-checks people, outcomes, and negations. If the script is rejected after one correction, the job becomes `blocked`. Running `retry` with the same inputs and settings does not grant unlimited validation attempts. Input validation does not establish whether the article itself is true or whether multiple sources agree.
+- The job folder's `article.json` and `news-plan.json` are caches keyed by their inputs. If the body hash or settings change, the plan is validated again. Speech is reused by sentence, model, and voice. The final `validation.json` links the video, metadata, and timeline. When they match, publishing can recover without downloading the article again or running a model. If a file changes after its upload has started, the job is put on hold rather than rendered again.
+- Before migrating from schema 2 to schema 3, the app creates `backups/pre-news.sqlite3` with 0600 permissions. Existing story and Instagram job inputs, settings, files, YouTube targets, notifications, Telegram receive history, and earlier backups are preserved. Stop `serve` and `work`, then run `init` to migrate the operational database.
+- News-specific defaults are excluded from the input keys of existing Instagram completion records. Instagram videos completed or already uploading under an earlier version can also recover using their original files.
+- Collection, card rendering, and recovery are tested with mock HTTP and real SQLite and FFmpeg. Runs combining real articles with local models require separate verification. Passing fixtures does not establish support for every publisher.
 
-### 메모리와 저장 공간
+### Memory and storage
 
-Gemma 3 12B 4bit와 TTS 모델은 캐시 기준 합계 약 9.35GiB입니다. 선택적 이미지 모델은 약 5.5GiB를 추가로 사용합니다. 가상환경·패키지 캐시·중간 영상 공간은 별도입니다.
-인스타그램 분석 모델은 Whisper 약 1.50GiB, Qwen3-VL 약 2.90GiB를 추가로 사용합니다.
-모델은 기본적으로 `~/.cache/huggingface/hub`에 있으며 다른 앱과 캐시를 공유할 수 있습니다. 이번 개발 중 내려받은 미사용 비교 모델 3개는 정리하여 약 12GiB를 회수했습니다. 운영 프로그램이 모델이나 완성본을 자동 삭제하지는 않습니다.
+The cached Gemma 3 12B 4-bit and TTS models total about 9.35 GiB. The optional image model needs another 5.5 GiB. The virtual environment, package cache, and intermediate videos require additional space.
+Instagram analysis adds about 1.50 GiB for Whisper and 2.90 GiB for Qwen3-VL.
+Models are stored in `~/.cache/huggingface/hub` by default, and the cache may be shared with other apps. Three unused comparison models downloaded during development were removed, recovering about 12 GiB. The app does not automatically delete models or completed output.
 
-24GB 통합 메모리에서 생성 작업을 순차 실행합니다. 영상 생성 중 다른 대형 모델 앱을 동시에 실행하면 메모리 압박과 속도 저하가 생길 수 있습니다.
-Air는 팬이 없으므로 지속 부하에서 속도가 달라질 수 있습니다. 하루 한 편으로 시작해 실제 처리 시간을 확인하세요.
+Generation tasks run sequentially on 24 GB of unified memory. Running other large-model apps during video generation can increase memory pressure and slow processing.
+The MacBook Air has no fan, so performance can vary under sustained load. Start with one video per day and check actual processing times.
 
-설정을 바꾸어도 기존 작업은 당시 설정을 계속 사용합니다. 다른 모델이나 스타일로 다시 만들려면 새 작업을 생성하세요.
-완성 전 작업의 대본·음성·이미지를 직접 바꾸면 단계 간 불일치가 생길 수 있습니다. 대본 변경은 `create --story 새파일.json`으로 새 작업을 만드세요.
+Existing jobs keep the settings they were created with, even after you change the configuration. Create a new job to use a different model or style.
+Manually changing a script, audio, or images before a job finishes can leave its processing steps out of sync. For script changes, create a new job with `create --story new-story.json`.
 
-### 로컬 실측 — 2026-10-11
+### Local measurements (2026-10-11)
 
-M5 / 24GB에서 기존 65.21초 한국어 샘플을 외부 영상 입력으로 복사해 측정했습니다. 실제 생성 모델과 FFmpeg를 사용했고, Instagram 다운로드는 별도 연결 확인 대상입니다.
+Measurements were taken on an M5 with 24 GB of memory, using a copy of an existing 65.21-second Korean sample as external video input. The run used the actual generation models and FFmpeg. Instagram downloading requires a separate connectivity check.
 
-| 단계 | 측정 시간 | 자식 프로세스 최대 RSS / 메모리 footprint |
+| Step | Measured time | Child process peak RSS / memory footprint |
 | --- | --- | --- |
-| 한국어 전사 | 4.65~11.39초 | 약 1.95GB / 3.25GB |
-| 28프레임 장면 분석 | 45.30초 | 약 4.08GB / 6.12GB; MLX peak 약 4.0GB |
-| 성공한 편집 기획 | 36.40~39.38초 | 약 6.02GB / 10.37GB |
-| 한국어 해설 6개 생성 | 16.47초 | 약 2.46GB / 8.19GB |
-| 영어 2문장 → 한국어 번역 | 8.91초 | 별도 로컬 입력으로 ID 보존 확인 |
+| Korean transcription | 4.65 to 11.39 seconds | About 1.95 GB / 3.25 GB |
+| Scene analysis of 28 frames | 45.30 seconds | About 4.08 GB / 6.12 GB; MLX peak about 4.0 GB |
+| Successful edit planning | 36.40 to 39.38 seconds | About 6.02 GB / 10.37 GB |
+| Generation of six Korean narration segments | 16.47 seconds | About 2.46 GB / 8.19 GB |
+| Translation of two English sentences into Korean | 8.91 seconds | ID preservation verified with separate local input |
 
-RSS와 macOS footprint는 다른 지표이며, 위 값은 순차 실행한 개별 프로세스 값입니다. 전체 메모리를 더한 값이나 모든 영상의 처리 시간 보장은 아닙니다. 모델 revision·원시 시간/메모리 기록은 `.omo/sdd/instagram-import-editing/model-metrics.json`, `model-storage.json`에 있습니다.
+RSS and macOS memory footprint are different metrics. The values above are for individual processes run sequentially, not combined memory usage or guaranteed processing times for every video. Model revisions and raw timing and memory records are in `.omo/sdd/instagram-import-editing/model-metrics.json` and `model-storage.json`.
 
-- 최종 **원음형 59.0초**, **해설형 39.7초**: 모두 1080×1920 / 30fps / H.264·AAC, 전체 디코딩 통과.
-- 수정 후 분석·기획·음성 캐시를 재사용한 두 영상 렌더링·검증은 총 58.31초였습니다. 회귀 테스트가 일부 병행됐으며 최초 모델 실행 시간은 포함하지 않습니다.
-- 12개 컷의 원음/생성 음성과 출력 파형 비교에서 측정 지연은 0ms, 상관계수는 0.918~1.000이었습니다. 해설 영상의 재생 속도는 약 0.914~1.000배입니다.
-- 한국어 원본 전사는 공백·문장부호를 제외한 241글자가 대본과 일치했습니다. 시각 모델은 원본에 이미 삽입된 글자 일부를 잘못 읽거나 문장을 끊었습니다. 이 샘플의 성공이 장면 설명 전반의 정확도를 보장하지는 않습니다.
-- 결과와 동기 측정: `.omo/sdd/instagram-import-editing/measurement-accepted/acceptance-results.json`, `audio-sync.json`. 초기 실패와 수정 과정도 같은 실행 디렉터리에 보존합니다.
+- Final output: 59.0 seconds for the original-audio version and 39.7 seconds for the narrated version. Both were 1080x1920 at 30 fps with H.264 video and AAC audio, and both passed full decoding checks.
+- After fixes, rendering and validating both videos took 58.31 seconds total, reusing cached analysis, planning, and speech. Some regression tests ran concurrently. This time excludes the initial model runs.
+- Comparing the original or generated audio against output waveforms across 12 cuts gave a measured delay of 0 ms and correlation coefficients from 0.918 to 1.000. The narrated video's playback speed ranged from about 0.914x to 1.000x.
+- The Korean source transcription matched all 241 script characters after excluding spaces and punctuation. The vision model misread some text already embedded in the source and split some sentences. Success on this sample does not establish the accuracy of scene descriptions in general.
+- Results and synchronization measurements are in `.omo/sdd/instagram-import-editing/measurement-accepted/acceptance-results.json` and `audio-sync.json`. Initial failures and the fixes are also preserved in the same run directory.
 
-당시 회귀 검사는 **218개 통과**, Ruff·잠금 파일 확인·wheel/sdist 빌드 통과입니다. Python 3.13에서 고정된 Instaloader가 내는 `utcfromtimestamp` 폐기 예정 경고 1건이 남아 있습니다.
+The regression run at that time passed all 218 tests. Ruff, lockfile checks, and wheel and sdist builds also passed. One `utcfromtimestamp` deprecation warning remained from the pinned Instaloader version on Python 3.13.
 
-## 한글 자막·음성
+## Korean captions and speech
 
-- 기본 폰트는 macOS Apple SD Gothic Neo입니다. 다른 환경에서는 `font_path`로 한글 폰트를 지정합니다.
-- 음성은 모델의 실제 한국어 발음 품질에 영향을 받습니다. 예제 영상으로 목소리와 문장 길이를 확인하세요.
-- 긴 대본이나 TTS 반복 생성으로 길이 제한을 넘으면 업로드 전에 실패합니다.
-- 화면은 장면별 정적 자막과 배경 움직임을 사용합니다. 단어별 강조 자막, 완전한 AI 동영상 생성, 자동 BGM 선곡은 현재 기능이 아닙니다.
+- The default font is Apple SD Gothic Neo on macOS. On other systems, set `font_path` to a Korean font.
+- Speech quality depends on the model's Korean pronunciation. Use a sample video to check the voice and sentence length.
+- If a long script or repetitive TTS output exceeds the duration limit, the job fails before uploading.
+- Videos use static captions for each scene with background motion. Word-by-word caption highlighting, fully AI-generated video, and automatic background music selection are not currently supported.
 
-## 봇이 응답하지 않을 때
+## When the bot does not respond
 
-`serve` 실행 여부, Mac 절전 여부, 개인 대화인지, 사용자 ID가 맞는지 확인합니다.
-한 봇 토큰을 두 long-polling 앱에서 동시에 사용하지 마세요. 서비스 로그는 `data/service.log`입니다.
-`/channels`로 목록을 보고 `/channel animals`로 선택합니다. 선택은 재시작 후에도 유지됩니다. Telegram의 `/pause`는 선택 채널, `/pause all`은 전체입니다. CLI의 인자 없는 `pause`는 전체이므로 범위가 다릅니다.
-`/set schedule_enabled off`와 `/set autopublish off`는 선택 채널의 예약/자동 업로드를 각각 끕니다. 작업 ID 명령은 원래 작업 채널에 적용되고 응답에 채널을 표시합니다.
-YouTube 연결이나 Telegram 연결이 없어도 `create --local-only`와 `work`로 로컬 제작을 계속할 수 있습니다.
-명령 처리 결과와 영상 미리보기 전송은 별도 큐에 저장됩니다. 영상 전송이 실패해도 `/pause` 같은 다음 명령을 계속 처리하며, 이미 처리한 명령을 다시 받아도 작업을 다시 변경하지 않습니다.
+Check that `serve` is running, the Mac is awake, the conversation is private, and the user ID is correct.
+Do not use the same bot token in two long-polling apps at once. Service logs are in `data/service.log`.
+Use `/channels` to list channels and `/channel animals` to select one. The selection persists across restarts. In Telegram, `/pause` applies to the selected channel and `/pause all` applies globally. In the CLI, `pause` without arguments applies globally.
+`/set schedule_enabled off` disables scheduling for the selected channel, and `/set autopublish off` disables its automatic uploads. Commands that take a job ID apply to the job's original channel and include that channel in the response.
+You can continue local production with `create --local-only` and `work` even without a YouTube or Telegram connection.
+Command results and video preview deliveries use separate queues. If a video delivery fails, subsequent commands such as `/pause` are still processed. Receiving an already processed command again does not change the job a second time.
