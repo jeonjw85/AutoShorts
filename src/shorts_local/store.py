@@ -14,6 +14,7 @@ from .config import Settings
 from .instagram_models import InstagramInput
 from .migrations import ensure_database
 from .models import Story
+from .news_models import NewsInput
 from .process import BlockedError, atomic_json
 from .profiles import ChannelProfile, validate_channel_id, validate_youtube_id
 
@@ -133,7 +134,7 @@ class Store:
     def enqueue(self, settings: Settings | None = None, key: str | None = None,
                 publish: bool | None = None, story: Story | None = None, *,
                 channel_id: str = "default", topic: str | None = None,
-                input: InstagramInput | None = None) -> str:
+                input: InstagramInput | NewsInput | None = None) -> str:
         job_id = uuid.uuid4().hex[:12]
         now = time.time()
         with self.transaction(), self.db() as db:
@@ -158,6 +159,19 @@ class Store:
                     return item["job_id"]
                 if item["status"] != "available":
                     raise ValueError("이 소재는 제작할 수 없습니다.")
+            elif settings.production_type == "news":
+                if input is None or story is not None or topic is not None:
+                    raise ValueError("뉴스 작업에는 기사 입력만 사용할 수 있습니다.")
+                input = NewsInput.model_validate(input)
+                item = db.execute("SELECT * FROM news_items WHERE id=?", (input.item_id,)).fetchone()
+                if (item is None or item["channel_id"] != channel_id
+                        or item["canonical_url"] != input.url or item["source_id"] != input.source_id
+                        or item["published_at"] != input.published_at):
+                    raise ValueError("작업 입력과 기사의 채널/원본이 다릅니다.")
+                if item["job_id"]:
+                    return item["job_id"]
+                if item["status"] != "available":
+                    raise ValueError("이 기사는 제작할 수 없습니다.")
             elif input is not None:
                 raise ValueError("이야기 작업에는 외부 소재를 사용할 수 없습니다.")
             if topic is not None:
@@ -171,7 +185,8 @@ class Store:
                   "fetch" if input else "plan"))
             if input is not None and inserted.rowcount:
                 atomic_json(self.root / "jobs" / job_id / "input.json", input.model_dump())
-                db.execute("UPDATE instagram_items SET status='reserved',job_id=? WHERE id=?",
+                table = "news_items" if settings.production_type == "news" else "instagram_items"
+                db.execute(f"UPDATE {table} SET status='reserved',job_id=? WHERE id=?",
                            (job_id, input.item_id))
             if story is not None and inserted.rowcount:
                 # The transaction is still invisible to claimers until the artifact exists.

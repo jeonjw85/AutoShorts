@@ -10,6 +10,7 @@ from .engines import images_complete, speech_complete
 from .instagram import InstagramError
 from .instagram_store import InstagramStore
 from .models import Story, VideoMetadata
+from .news_fetch import UnsupportedArticle
 from .planning import plan_story
 from .process import BlockedError, QuotaError, exclusive_lock, run_process
 from .profiles import UploadTarget
@@ -113,6 +114,11 @@ def execute_job(store: Store, job: dict):
 
         video, metadata = prepare_imported_video(store, job, settings, folder)
         store.update(job["id"], title=metadata.title)
+    elif settings.production_type == "news":
+        from .news_pipeline import prepare_news_video
+
+        video, metadata = prepare_news_video(store, job, settings, folder)
+        store.update(job["id"], title=metadata.title)
     else:
         video, metadata = _prepare_story(store, job, folder, settings)
     if job["publish"]:
@@ -150,6 +156,13 @@ def run_next(root: Path) -> str | None:
             else:
                 store.fail(job["id"], str(exc), delay=60 * 2 ** (job["attempts"] - 1))
                 store.notify(f"작업 재시도/실패 · {job['id']}\n{exc}", job["id"])
+        except UnsupportedArticle as exc:
+            from .news_store import NewsStore
+
+            with store.transaction():
+                NewsStore(store).reject_item(job["input"]["item_id"], str(exc))
+                store.update(job["id"], status="blocked", error=str(exc))
+                store.notify(f"기사 확인 필요 · {job['id']}\n{exc}", job["id"])
         except BlockedError as exc:
             store.update(job["id"], status="blocked", error=str(exc)[:500])
             store.notify(f"설정/복구 필요 · {job['id']}\n{exc}", job["id"])

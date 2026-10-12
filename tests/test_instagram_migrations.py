@@ -18,7 +18,7 @@ def test_schema1_upgrade_preserves_bytes_and_history(schema1_home):
     video = (schema1_home / "jobs/legacy-ready/video.mp4").read_bytes()
     s = Store(schema1_home)
     with s.db() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert db.execute("SELECT input FROM jobs").fetchall()[0][0] is None
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     after = snapshot(schema1_home)
@@ -66,13 +66,13 @@ def test_schema2_locking_and_future_versions(schema1_home, lock):
     with exclusive_lock(schema1_home / lock):
         assert len(Store(schema1_home).profiles()) == 2
     with sqlite3.connect(schema1_home / "state.sqlite3") as db:
-        db.execute("PRAGMA user_version=3")
+        db.execute("PRAGMA user_version=4")
     with pytest.raises(BlockedError):
         Store(schema1_home)
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_new_and_schema0_homes_reach_schema2(tmp_path, legacy_home, legacy):
+def test_new_and_schema0_homes_reach_current_schema(tmp_path, legacy_home, legacy):
     root = legacy_home if legacy else tmp_path / "fresh"
     with Store(root).db() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3

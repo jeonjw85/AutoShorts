@@ -21,6 +21,7 @@ Models run on the Mac. The default workflow does not need a paid inference API o
 - Planning, speech, transcription, and visual analysis run locally with MLX.
 - Each channel has its own schedule, style, upload target, and pause control.
 - Instagram edits can add Korean narration or keep the original audio with Korean subtitles.
+- Article links and RSS feeds can supply news cards with Korean narration, sources, and dates.
 - Completed stages are kept. Retries are limited, and an interrupted upload can resume.
 - Telegram can queue jobs, change settings, and send a preview.
 - Default output is 9:16, 1080 x 1920, 30 fps, H.264, and AAC.
@@ -31,9 +32,9 @@ Models run on the Mac. The default workflow does not need a paid inference API o
 | --- | --- | --- |
 | **Stories** | Topic or script → Korean narration, illustrated or generated images, and captions | Implemented; local end-to-end generation verified |
 | **Instagram edits** | Reel or single-video post → narrated edit or original-audio subtitled edit | Implemented; local editing verified, live collection validation pending |
-| **News cards** | Reviewed articles → photo-led cards, large two-line summaries, and narration | Validated prototype; automated article ingestion and queue integration pending |
+| **News cards** | Article link or RSS item → large two-line cards, Korean narration, source, and date | Implemented; ingestion and rendering tested with fixtures, live article/model acceptance pending |
 
-The production CLI currently supports `story` and `instagram`; news cards remain a separate prototype. Story visuals use still-image motion, while Instagram edits use source footage. Captions are displayed per scene or speech segment.
+The production CLI supports `story`, `instagram`, and `news`. Story visuals use still-image motion, Instagram edits use source footage, and news uses article images or text cards. Captions are displayed per scene or speech segment.
 
 ## Quickstart
 
@@ -100,6 +101,7 @@ data/jobs/<job-id>/
 ```
 
 Instagram jobs additionally retain source media, transcripts, visual observations, edit plans, and publication metadata. Stage logs are stored alongside the artifacts.
+News jobs keep `input.json`, `article.json`, optional `image.jpg`, `news-plan.json`, narration, captions, and publication metadata. Article and plan caches include their input keys.
 
 ## Channels
 
@@ -127,6 +129,7 @@ Each profile has its own content settings, daily schedule, and YouTube account. 
 | Automatic YouTube publishing | Disabled until YouTube login |
 | Upload visibility | `public` |
 | Instagram collection interval | 60 minutes |
+| News RSS collection interval | 60 minutes |
 
 - Settings are stored in `data/state.sqlite3`. Inspect them with `config`; use `--values` for an atomic update of related fields.
 - A job keeps the channel, settings, and inputs it had when queued. Later setting changes apply to new jobs, and publishing stays tied to the job's original profile.
@@ -184,6 +187,38 @@ Collection starts with posts published after source registration. At the daily s
 
 Use `source scan --channel animals` for a bounded collection check, or `source pause SOURCE_ID` / `source resume SOURCE_ID` to control a source. Direct imports and per-job `--type` / `--mode` overrides preserve the channel defaults.
 
+## News cards
+
+News uses the existing planner and speech models. No news API subscription or additional model is required.
+
+Import one public HTTPS article immediately:
+
+```bash
+.venv/bin/shorts-local import-article 'https://example.com/story' --local-only
+.venv/bin/shorts-local work
+```
+
+For daily production from RSS 2.0 or Atom, replace the example URL with a real feed:
+
+```bash
+.venv/bin/shorts-local channel add news --name "Daily News"
+.venv/bin/shorts-local config --channel news production_type news
+.venv/bin/shorts-local news-source add 'https://example.com/feed.xml' --channel news
+.venv/bin/shorts-local news-source list --channel news
+.venv/bin/shorts-local news-source scan --channel news
+.venv/bin/shorts-local serve
+```
+
+Only items published after feed registration enter the automatic queue. At the scheduled time, the oldest unused article supplies one job. An empty feed leaves the day open for a later article. Tracking parameters are removed for deduplication within each channel. Direct imports can use older articles and preserve channel defaults.
+
+Use `create --type news --channel news --local-only` to queue an unused article manually. Control a feed with `news-source pause SOURCE_ID` and `news-source resume SOURCE_ID`. Set the tone with `news_style`, the polling interval with `news_poll_minutes` (15–1440), and the accent with `instagram_accent_color`.
+
+Each video has 4–6 cards. Every card includes the source and publication date in the channel timezone; the description includes the canonical article link. Failed or missing representative images fall back to text cards.
+
+Articles need at least 400 characters of extractable text and a publication date from the page or feed. Login-only, paywalled, and script-rendered pages may not work. A date is never invented. Public-address checks apply to every redirect and image request.
+
+Before narration, the app checks quotations and numbers, then asks the configured planner to compare every claim with the article. A rejected plan gets one correction before the job becomes `blocked`. These checks compare the script with one source; they do not independently establish that source's accuracy. Fixture tests do not establish coverage of every outlet or replace a live article/model acceptance run.
+
 ## Integrations
 
 ### Telegram
@@ -202,6 +237,7 @@ The bot accepts private messages from the configured owner. It uses long polling
 | `/channels`, `/channel animals` | List profiles or select the active profile |
 | `/create [topic]`, `/create_story [topic]` | Queue content using the profile default or explicitly create a story |
 | `/import URL [narrated\|original]` | Queue an Instagram video; a direct link also works |
+| `/article URL` | Queue a news article; a standalone non-Instagram HTTPS link also works |
 | `/status`, `/queue`, `/settings` | Inspect the selected profile; append `all` to status or queue for all profiles |
 | `/preview JOB_ID`, `/upload JOB_ID` | Receive a finished video or queue it for publishing |
 | `/pause`, `/resume`, `/retry JOB_ID` | Control production and retry jobs |
@@ -218,6 +254,9 @@ The bot accepts private messages from the configured owner. It uses long polling
 | `/source_add USERNAME`, `/sources` | Register or list collection sources |
 | `/source_pause ID`, `/source_resume ID` | Pause or resume a source |
 | `/source_scan`, `/materials` | Request collection or inspect available material |
+| `/news_add FEED_URL`, `/news_sources` | Register or list RSS feeds |
+| `/news_pause ID`, `/news_resume ID`, `/news_scan` | Control feeds or request a background check |
+| `/set type news`, `/set news_style TEXT`, `/set news_poll_minutes 60` | Configure news production |
 | `/set type instagram`, `/set edit_mode original` | Set production type and editing mode |
 | `/set edit_style TEXT`, `/set accent #E8B257` | Set commentary style and accent color |
 | `/set topic TEXT`, `/set name TEXT` | Set the topic and display name |
@@ -319,7 +358,8 @@ SQLite job queue
       ▼
 Production worker
       ├── Story:     plan → speech → artwork → render
-      └── Instagram: fetch → analyze → edit plan → speech* → render
+      ├── Instagram: fetch → analyze → edit plan → speech* → render
+      └── News:      fetch → extract → grounded plan → speech → cards
       │
       ▼
 Media validation → local output → optional YouTube upload → notification
@@ -372,16 +412,17 @@ This integration is limited to script planning. The app requires subscription lo
 
 ## Validation
 
-Checked on **October 11, 2026**, on an M5 MacBook Air with 24 GB unified memory.
+Local generation was checked on **October 11, 2026**, on an M5 MacBook Air with 24 GB unified memory. Regression and news integration checks were updated on **October 12, 2026**.
 
 | Check | Result |
 | --- | --- |
-| Automated regression suite | **222 passed** |
+| Automated regression suite | **276 passed** |
 | Static checks and dependency lock | Ruff and `uv lock --check` passed |
-| Packaging | Wheel and source distribution built |
+| Packaging | v0.1.0 wheel and source distribution built |
 | Story pipeline | Local planning, Korean narration, and generated images; 65.21-second output |
 | Instagram editing | 59.0-second original-audio edit and 39.7-second narrated edit from a local fixture |
 | News-card prototype | 41.17-second, five-card video; encoded narration matched the script after text normalization |
+| News integration | Article/RSS fixtures, channel scheduling, factual-validation rejection, 360 x 640 card rendering, and sealed recovery passed |
 | Media output | Verified 1080 x 1920, 30 fps, H.264/AAC, including full decode checks |
 
 The suite covers scheduling, channel isolation, recovery, duplicate commands, access control, real FFmpeg rendering, and simulated upload failures. Live-account acceptance for Instagram collection, Telegram messaging, and YouTube publishing remains pending. Media checks validate the file and timing; factual accuracy requires content review.

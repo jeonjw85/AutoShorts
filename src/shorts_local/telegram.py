@@ -7,6 +7,7 @@ import httpx
 from .config import Settings
 from .instagram_models import parse_instagram_url
 from .instagram_store import InstagramStore
+from .news_store import NewsStore
 from .process import BlockedError, atomic_json
 from .store import Store
 
@@ -21,6 +22,10 @@ HELP = """Shorts Local · 로컬 쇼츠 제작기
 /source_pause ID · /source_resume ID — 수집원 정지/재개
 /source_scan · /materials — 수집 예약/소재 조회
 /import URL [narrated|original] — 링크 제작 (URL만 보내도 가능)
+/article URL — 기사 링크로 뉴스 제작 (HTTPS URL만 보내도 가능)
+/news_add FEED_URL · /news_sources — RSS 등록/조회
+/news_pause ID · /news_resume ID — RSS 정지/재개
+/news_scan — RSS 확인 예약
 /queue [all] — 선택 채널/전체 작업 목록
 /preview 작업ID — 완성 영상 받기
 /pause · /resume — 선택 채널 정지/재개
@@ -38,7 +43,8 @@ HELP = """Shorts Local · 로컬 쇼츠 제작기
 /set name 채널이름 · /set voice Sohee
 /set timezone Asia/Seoul
 /set schedule_enabled on 또는 off
-/set type story 또는 instagram
+/set type story, instagram 또는 news
+/set news_style 뉴스 말투 · /set news_poll_minutes 60
 /set edit_mode narrated 또는 original
 /set edit_style 편집 지침 · /set accent #E8B257
 진행 중인 작업은 설정 변경의 영향을 받지 않습니다."""
@@ -82,7 +88,8 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
     try:
         _, url = parse_instagram_url(text)
     except ValueError:
-        pass
+        if text.lower().startswith("https://") and not any(c.isspace() for c in text):
+            text = f"/article {text}"
     else:
         text = f"/import {url}"
     command, _, arg = text.partition(" ")
@@ -114,13 +121,16 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
         p = store.profile(store.value("telegram_channel", "default"))
         label, settings = p.label, p.settings
         instagram = InstagramStore(store)
+        news = NewsStore(store)
         if command == "/channel":
             return reply("현재 선택한 채널입니다.")
         if command in {"/start", "/help"}:
             return reply(HELP)
-        if command in {"/create", "/create_story", "/import"}:
+        if command in {"/create", "/create_story", "/import", "/article"}:
             key = f"telegram:{update['update_id']}"
-            if command == "/import":
+            if command == "/article":
+                job = news.import_article(arg, channel_id=p.id, key=key)
+            elif command == "/import":
                 parts = arg.split()
                 if len(parts) not in (1, 2) or len(parts) == 2 and parts[1] not in {"original", "narrated"}:
                     raise ValueError
@@ -129,13 +139,31 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
                 if arg:
                     return reply("인스타그램 제작에는 이야기 주제를 넣을 수 없습니다. /create_story를 사용하세요.")
                 job = instagram.enqueue_next(channel_id=p.id, key=key)
+            elif command == "/create" and settings.production_type == "news":
+                if arg:
+                    return reply("뉴스 제작에는 이야기 주제를 넣을 수 없습니다. /article 또는 /create_story를 사용하세요.")
+                job = news.enqueue_next(channel_id=p.id, key=key)
             else:
                 options = Settings.model_validate(settings.model_dump() | {"production_type": "story"})
                 job = store.enqueue(options, channel_id=p.id, topic=arg or None, key=key)
             if job is None:
-                return reply("소재 대기 · 사용 가능한 새 영상이 없습니다.")
+                return reply("소재 대기 · 사용 가능한 새 소재가 없습니다.")
             kind = Settings.model_validate(store.get(job)["settings"]).production_label
             return reply(f"{kind} 작업 등록: {job}")
+        if command == "/news_add":
+            source = news.add_source(arg, channel_id=p.id)
+            return reply(f"뉴스 수집원: {source['id']} · {source['status']}")
+        if command == "/news_sources":
+            return reply("\n".join(f"{s['id']} {s['feed_url']} · {s['status']} · 활성: {bool(s['active'])}"
+                                    for s in news.sources(p.id)) or "등록된 피드 없음")
+        if command in {"/news_pause", "/news_resume"}:
+            source = news.source(arg)
+            label = store.profile(source["channel_id"]).label
+            news.set_source_active(arg, command == "/news_resume")
+            return reply(f"뉴스 수집원 {arg} · {'재개' if command == '/news_resume' else '정지'}")
+        if command == "/news_scan":
+            news.request_scan(p.id)
+            return reply("뉴스 수집 확인을 예약했습니다. 정지/재시도 대기 시각을 따릅니다.")
         if command == "/source_add":
             source = instagram.add_source(arg, channel_id=p.id)
             return reply(f"수집원: {source['id']} @{source['username']} · {source['status']} · 연결 대기")
@@ -166,7 +194,8 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
             lines = [f"버전: {installed_version()}", "일시정지" if paused else "실행 가능",
                      f"기획: {settings.planner} · 화면: {settings.visuals} · 추가 서비스 요금 0원"]
             for channel in store.profiles() if selected is None else [p]:
-                state = instagram.channel_state(channel.id)
+                materials = news if channel.settings.production_type == "news" else instagram
+                state = materials.channel_state(channel.id)
                 lines.append(f"{channel.label} {channel.settings.production_label} · 소재: {state['available']} · "
                              f"{'소재 대기' if not state['available'] else '소재 준비'} · auth_wait: {state['auth_wait']}")
             lines += [f"[{x['channel_id']}] {x['id']} · {Settings.model_validate(x['settings']).production_label} · "
@@ -196,6 +225,7 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
             return reply(f"작업을 다시 등록했습니다: {arg}")
         if command == "/settings":
             return reply(f"제작: {settings.production_label}\n편집: {settings.instagram_style}\n"
+                         f"뉴스: {settings.news_style} · RSS {settings.news_poll_minutes}분\n"
                          f"주제: {settings.topic}\n예약: {settings.schedule_enabled} "
                          f"{settings.schedule_time} ({settings.timezone})\n"
                          f"기획: {settings.planner}\n화면: {settings.visuals}\n목소리: {settings.speech_voice}\n"
@@ -207,7 +237,8 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
                        "name": "channel_name", "voice": "speech_voice", "timezone": "timezone",
                        "schedule_enabled": "schedule_enabled", "type": "production_type",
                        "edit_mode": "instagram_edit_mode", "edit_style": "instagram_style",
-                       "accent": "instagram_accent_color"}
+                        "accent": "instagram_accent_color", "news_style": "news_style",
+                        "news_poll_minutes": "news_poll_minutes"}
             if key not in fields or not value.strip():
                 return reply("설정 형식을 확인하세요. /help")
             if key in {"autopublish", "schedule_enabled"}:

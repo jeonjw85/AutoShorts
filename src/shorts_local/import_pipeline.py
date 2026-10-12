@@ -22,7 +22,10 @@ from .youtube import file_hash
 
 
 def _job_key(job, settings):
-    return artifact_key("instagram-job", {"input": job["input"], "settings": settings.model_dump(),
+    # Schema-1 Instagram seals predate news-only settings. Those defaults must
+    # neither invalidate old upload bytes nor influence new Instagram seals.
+    parameters = settings.model_dump(exclude={"news_style", "news_poll_minutes"})
+    return artifact_key("instagram-job", {"input": job["input"], "settings": parameters,
                                           "channel_id": job["channel_id"]})
 
 

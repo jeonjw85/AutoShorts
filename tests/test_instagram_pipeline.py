@@ -84,6 +84,40 @@ def test_ready_video_recovers_without_source_models_or_disk_budget(tmp_path, mon
     assert store.get(job)["status"] == "uploaded", store.get(job)["error"]
 
 
+@pytest.mark.parametrize("upload_started", [False, True])
+def test_baseline_instagram_seal_survives_new_news_settings(tmp_path, monkeypatch, upload_started):
+    import shorts_local.import_pipeline as imported
+    import shorts_local.pipeline as pipeline
+    from shorts_local.artifacts import artifact_key
+
+    store, job_id, folder, _, _ = prepared_job(tmp_path, monkeypatch)
+    pipeline.run_next(tmp_path)
+    assert store.get(job_id)["status"] == "ready"
+    job = store.get(job_id)
+    baseline_settings = dict(job["settings"])
+    del baseline_settings["news_style"]
+    del baseline_settings["news_poll_minutes"]
+    seal = json.loads((folder / "validation.json").read_text())
+    seal["job_key"] = artifact_key("instagram-job", {
+        "input": job["input"], "settings": baseline_settings, "channel_id": job["channel_id"]})
+    atomic_json(folder / "validation.json", seal)
+    with store.db() as db:
+        db.execute("UPDATE jobs SET settings=? WHERE id=?", (json.dumps(baseline_settings), job_id))
+    if upload_started:
+        atomic_json(folder / "upload-state.json", {"existing": True})
+    video_bytes = (folder / "video.mp4").read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Baseline completed video must not regenerate after upgrade")
+
+    for name in ("fetch_source", "analyze_source", "plan_edit", "prepare_narration", "render_imported_video"):
+        monkeypatch.setattr(imported, name, forbidden)
+    job = store.get(job_id)
+    ready = imported.prepare_imported_video(store, job, Settings.model_validate(job["settings"]), folder)
+    assert ready[0].read_bytes() == video_bytes
+    assert store.get(job_id)["settings"] == baseline_settings
+
+
 @pytest.mark.parametrize("file", ["video.mp4", "metadata.json", "validation.json", "timeline.json"])
 def test_upload_artifact_prevents_rerender_of_changed_video(tmp_path, monkeypatch, file):
     import shorts_local.import_pipeline as imported
