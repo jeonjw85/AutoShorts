@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from .config import Settings, initialize
 from .instagram_store import InstagramStore
 from .models import Story
+from .news_store import NewsStore
 from .pipeline import run_next
 from .process import BlockedError, BusyError, atomic_json, exclusive_lock
 from .profiles import UploadTarget
@@ -27,6 +28,8 @@ channel_app = typer.Typer(help="채널별 프로필 관리", no_args_is_help=Tru
 app.add_typer(channel_app, name="channel")
 source_app = typer.Typer(help="인스타그램 수집 계정 관리", no_args_is_help=True)
 app.add_typer(source_app, name="source")
+news_source_app = typer.Typer(help="뉴스 RSS 수집원 관리", no_args_is_help=True)
+app.add_typer(news_source_app, name="news-source")
 
 
 def profile_for(store: Store, channel: str):
@@ -215,22 +218,24 @@ def create(ctx: typer.Context, topic: str | None = None,
     profile = profile_for(store, channel)
     try:
         kind = production_type or ("story" if story else profile.settings.production_type)
-        if (upload and local_only or kind not in {"story", "instagram"}
-                or kind == "instagram" and (topic is not None or story is not None)
-                or kind == "story" and mode is not None
+        if (upload and local_only or kind not in {"story", "instagram", "news"}
+                or kind in {"instagram", "news"} and (topic is not None or story is not None)
+                or kind != "instagram" and mode is not None
                 or mode is not None and mode not in {"narrated", "original"}):
             raise ValueError("제작 유형·모드·대본·게시 옵션의 조합이 올바르지 않습니다.")
         publish = False if local_only else True if upload else None
         document = Story.model_validate_json(story.read_text()) if story else None
         if kind == "instagram":
             job = InstagramStore(store).enqueue_next(channel_id=channel, mode=mode, publish=publish)
+        elif kind == "news":
+            job = NewsStore(store).enqueue_next(channel_id=channel, publish=publish)
         else:
             settings = Settings.model_validate(profile.settings.model_dump() | {"production_type": "story"})
             job = store.enqueue(settings, channel_id=channel, topic=topic, publish=publish, story=document)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from None
     if job is None:
-        typer.echo(f"{profile.label} 소재 대기 · 사용 가능한 새 영상이 없습니다.")
+        typer.echo(f"{profile.label} 소재 대기 · 사용 가능한 새 소재가 없습니다.")
         return
     kind = Settings.model_validate(store.get(job)["settings"]).production_label
     typer.echo(f"{profile.label} {kind} 작업 등록: {job}\n처리: shorts-local work 또는 shorts-local serve")
@@ -265,6 +270,75 @@ def instagram_login(ctx: typer.Context, username: str):
     except (InstagramError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from None
     typer.echo(f"[공유 수집 계정] @{name} 연결 완료 · 인증 대기 작업을 복원했습니다.")
+
+
+@app.command("import-article")
+def import_article(ctx: typer.Context, url: str, channel: str = "default",
+                   upload: bool = False, local_only: bool = False):
+    """기사 HTTPS 링크를 뉴스 작업으로 등록합니다."""
+    store = Store(ctx.obj)
+    p = profile_for(store, channel)
+    if upload and local_only:
+        raise typer.BadParameter("--upload와 --local-only는 함께 사용할 수 없습니다.")
+    try:
+        job = NewsStore(store).import_article(url, channel_id=channel,
+                                             publish=False if local_only else True if upload else None)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"{p.label} news 작업: {job}")
+
+
+@news_source_app.command("add")
+def news_source_add(ctx: typer.Context, url: str, channel: str = "default"):
+    store = Store(ctx.obj)
+    p = profile_for(store, channel)
+    try:
+        source = NewsStore(store).add_source(url, channel_id=channel)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"{p.label} 뉴스 수집원: {source['id']} · {source['status']}")
+
+
+@news_source_app.command("list")
+def news_source_list(ctx: typer.Context, channel: str = "default"):
+    store = Store(ctx.obj)
+    typer.echo(profile_for(store, channel).label)
+    for source in NewsStore(store).sources(channel):
+        typer.echo(f"{source['id']} {source['feed_url']} · {source['status']} · 활성: {bool(source['active'])} · "
+                   f"다음 확인: {source['next_run']}")
+
+
+def _news_source_active(root, source_id, active):
+    store = Store(root)
+    news = NewsStore(store)
+    try:
+        source = news.source(source_id)
+        news.set_source_active(source_id, active)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    typer.echo(f"{store.profile(source['channel_id']).label} {source_id} · {'재개' if active else '정지'}")
+
+
+@news_source_app.command("pause")
+def news_source_pause(ctx: typer.Context, source_id: str):
+    _news_source_active(ctx.obj, source_id, False)
+
+
+@news_source_app.command("resume")
+def news_source_resume(ctx: typer.Context, source_id: str):
+    _news_source_active(ctx.obj, source_id, True)
+
+
+@news_source_app.command("scan")
+def news_source_scan(ctx: typer.Context, channel: str = "default"):
+    """허용된 뉴스 피드 하나를 최대 120초 확인합니다."""
+    from .news_collector import run_news_collection
+
+    store = Store(ctx.obj)
+    p = profile_for(store, channel)
+    NewsStore(store).request_scan(channel)
+    result = run_news_collection(ctx.obj, channel_id=channel)
+    typer.echo(f"{p.label} 뉴스 수집 확인: {result or '대기/정지 또는 등록된 피드 없음'}")
 
 
 @source_app.command("add")
@@ -374,7 +448,8 @@ def status(ctx: typer.Context, channel: str | None = None,
     paused = store.value("paused", False) or (profile is not None and profile.paused)
     typer.echo(f"{profile.label if profile else '[전체]'} {'일시정지' if paused else '실행 가능'}")
     for p in [profile] if profile else store.profiles():
-        state = InstagramStore(store).channel_state(p.id)
+        materials = NewsStore(store) if p.settings.production_type == "news" else InstagramStore(store)
+        state = materials.channel_state(p.id)
         typer.echo(f"{p.label} {p.settings.production_label} · 소재: {state['available']} · "
                    f"{'소재 대기' if not state['available'] else '소재 준비'} · auth_wait: {state['auth_wait']} · "
                    f"다음 수집: {state['next_run']}")
