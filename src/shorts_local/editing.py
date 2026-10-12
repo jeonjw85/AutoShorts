@@ -210,6 +210,10 @@ def prepare_narration(settings: Settings, plan: EditPlan, workdir: Path) -> list
     texts = [clip.narration for clip in plan.clips]
     if any(text is None for text in texts):
         raise ValueError("해설형 음성 문장이 없습니다.")
+    return prepare_speech(settings, texts, workdir)
+
+
+def prepare_speech(settings: Settings, texts: list[str], workdir: Path) -> list[Path]:
     key = artifact_key("speech", {"texts": texts, "model": settings.speech_model, "voice": settings.speech_voice})
     directory = workdir / "voice" / key
     files = [directory / f"{i:03}.wav" for i in range(len(texts))]
