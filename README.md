@@ -5,7 +5,7 @@ Make Korean Shorts on an Apple Silicon Mac. The app writes scripts, records narr
 Models run on the Mac. The default workflow does not need a paid inference API or a hosted server.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-0F766E)](pyproject.toml)
+[![Version: 0.1.3](https://img.shields.io/badge/Version-0.1.3-0F766E)](pyproject.toml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Apple Silicon](https://img.shields.io/badge/macOS-Apple_Silicon-181717?logo=apple&logoColor=white)](#requirements)
 
@@ -412,13 +412,13 @@ This integration is limited to script planning. The app requires subscription lo
 
 ## Validation
 
-Local generation was checked on **October 11, 2026**, on an M5 MacBook Air with 24 GB unified memory. Regression and news integration checks were updated on **October 12, 2026**.
+Local generation was checked on **October 11, 2026**, on an M5 MacBook Air with 24 GB unified memory. News integration checks were updated on **October 12, 2026**; regression and recovery checks were updated on **October 16, 2026**.
 
 | Check | Result |
 | --- | --- |
-| Automated regression suite | **276 passed** |
+| Automated regression suite | **301 passed** |
 | Static checks and dependency lock | Ruff and `uv lock --check` passed |
-| Packaging | v0.1.0 wheel and source distribution built |
+| Packaging | v0.1.3 wheel and source distribution built |
 | Story pipeline | Local planning, Korean narration, and generated images; 65.21-second output |
 | Instagram editing | 59.0-second original-audio edit and 39.7-second narrated edit from a local fixture |
 | News-card prototype | 41.17-second, five-card video; encoded narration matched the script after text normalization |
