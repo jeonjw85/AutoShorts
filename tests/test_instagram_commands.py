@@ -1,4 +1,5 @@
 import json
+from collections import namedtuple
 
 import pytest
 from typer.testing import CliRunner
@@ -9,6 +10,8 @@ from shorts_local.store import Store
 from shorts_local.telegram import handle_update
 from tests.instagram_helpers import batch, post
 from tests.test_service import update
+
+DiskUsage = namedtuple("DiskUsage", "total used free")
 
 
 def test_cli_import_create_and_flag_conflicts(tmp_path, story_data):
@@ -112,13 +115,16 @@ def test_cross_channel_ids_status_and_unauthorized_urls(tmp_path):
     assert "story" in reply["text"] and len(store.list()) == 2
 
 
-def test_doctor_and_model_download_selection(tmp_path, monkeypatch):
+@pytest.mark.parametrize("free_gb", [30, 40], ids=["at-minimum", "above-minimum"])
+def test_doctor_and_model_download_selection(tmp_path, monkeypatch, free_gb):
     import huggingface_hub
 
     import shorts_local.cli as cli
 
     store = Store(tmp_path)
     repos = []
+    usage = DiskUsage(total=100 * 1024**3, used=(100 - free_gb) * 1024**3, free=free_gb * 1024**3)
+    monkeypatch.setattr(cli.shutil, "disk_usage", lambda path: usage)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda repo, **kw: repos.append(repo))
     runner, home = CliRunner(), ["--home", str(tmp_path)]
     result = runner.invoke(app, home + ["models", "--instagram", "--images"])
@@ -134,3 +140,21 @@ def test_doctor_and_model_download_selection(tmp_path, monkeypatch):
     assert not report["instagram"]["instaloader_installed"]
     assert not report["instagram"]["session_present"]
     assert len(repos) == 5
+
+
+@pytest.mark.parametrize("free_bytes", [0, 30 * 1024**3 - 1], ids=["full-disk", "below-minimum"])
+def test_model_download_rejects_insufficient_disk_space(tmp_path, monkeypatch, free_bytes):
+    import huggingface_hub
+
+    import shorts_local.cli as cli
+
+    repos = []
+    usage = DiskUsage(total=100 * 1024**3, used=100 * 1024**3 - free_bytes, free=free_bytes)
+    monkeypatch.setattr(cli.shutil, "disk_usage", lambda path: usage)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda repo, **kw: repos.append(repo))
+
+    result = CliRunner().invoke(app, ["--home", str(tmp_path), "models", "--instagram", "--images"])
+
+    assert result.exit_code != 0, result.output
+    assert "여유 공간" in result.output
+    assert repos == []
