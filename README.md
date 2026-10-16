@@ -97,7 +97,7 @@ data/jobs/<job-id>/
 ├── cover.png           Story preview image
 ├── captions.srt        Captions
 ├── timeline.json       Measured scene timing
-└── validation.json     Media validation results
+└── validation.json     Media checks and hashes of completed artifacts
 ```
 
 Instagram jobs additionally retain source media, transcripts, visual observations, edit plans, and publication metadata. Stage logs are stored alongside the artifacts.

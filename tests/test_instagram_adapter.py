@@ -11,7 +11,7 @@ from shorts_local.instagram_models import InstagramInput, ScanBatch
 from shorts_local.instagram_store import InstagramStore
 from shorts_local.process import atomic_json
 from shorts_local.store import Store
-from tests.instagram_helpers import post
+from tests.instagram_helpers import batch, post
 
 
 def sdk_post(code, published=200, kind="GraphVideo"):
@@ -22,21 +22,26 @@ def sdk_post(code, published=200, kind="GraphVideo"):
                            _field=lambda key: "https://video.cdninstagram.com/file?secret=cap")
 
 
-def install_scan(monkeypatch, target, values, *, pinned=None):
+def install_scan(monkeypatch, target, values, *, pinned=None, reels=None, seen=None):
     import instaloader
 
     context = SimpleNamespace(username="login")
 
     # Frozen data must be JSON, as in the real SDK. Wrap raw dictionaries into posts lazily.
-    def feed(items):
+    def feed(name, items):
+        def wrap(node):
+            if seen is not None:
+                seen.append((name, node["code"]))
+            return sdk_post(node["code"], node["published"])
+
         return instaloader.NodeIterator(context, "fixture", lambda d: d,
-            lambda n: sdk_post(n["code"], n["published"]),
+            wrap,
             first_data={"edges": [{"node": {"code": p.shortcode,
                                              "published": p.date_utc.replace(tzinfo=UTC).timestamp()}}
                                   for p in items], "page_info": {"has_next_page": False}})
 
-    profile = SimpleNamespace(userid=123, username="renamed", get_posts=lambda: feed(values),
-                              get_reels=lambda: feed(values[:1]))
+    profile = SimpleNamespace(userid=123, username="renamed", get_posts=lambda: feed("posts", values),
+                              get_reels=lambda: feed("reels", values[:1] if reels is None else reels))
 
     def from_username(ctx, name):
         if pinned:
@@ -75,6 +80,147 @@ def test_scan_does_not_stop_at_old_or_pinned_post(tmp_path, monkeypatch):
     second = ScanBatch.model_validate_json((folder / "result.json").read_text())
     assert second.complete
     assert {p.shortcode for p in [*first.posts, *second.posts]} == {f"V{i}" for i in range(205)}
+
+
+def test_recent_scan_skips_old_history_but_daily_rescan_finds_delayed_posts(tmp_path, monkeypatch):
+    import shorts_local.instagram as target
+
+    ig = InstagramStore(Store(tmp_path))
+    source = ig.add_source("pets", now=100)
+    clock = [1000]
+    monkeypatch.setattr(target.time, "time", lambda: clock[0])
+    values = [sdk_post(f"Old{i}", 10) for i in range(205)]
+    seen = []
+    install_scan(monkeypatch, target, values, seen=seen)
+    folder = tmp_path / "scan"
+
+    def scan():
+        source = ig.source(source_id)
+        atomic_json(folder / "request.json", {"run_id": "a" * 32, "source": source})
+        target.scan_source(tmp_path, source, folder)
+        result = ScanBatch.model_validate_json((folder / "result.json").read_text())
+        ig.apply_scan(result, now=clock[0])
+        return result
+
+    source_id = source["id"]
+    assert not scan().complete
+    clock[0] = 1300
+    assert scan().complete
+    assert ig.source(source_id)["completed_through"] == 1000
+    values.insert(100, sdk_post("Delayed", 200))
+    seen.clear()
+    clock[0] = 1600
+    recent = scan()
+    assert recent.complete and len(seen) < 100
+    assert not recent.posts
+    after = ig.source(source_id)
+    assert after["completed_through"] == 1000
+    assert after["last_success"] == 1600
+    assert after["next_run"] == 1600 + ig.store.profile().settings.instagram_poll_minutes * 60
+    seen.clear()
+    clock[0] = 87401  # A day since the walk started, but not since it finished.
+    assert scan().complete and len(seen) < 100
+    seen.clear()
+    clock[0] = 87701
+    full = scan()
+    assert not full.complete and len(seen) == 200
+    assert "Delayed" in {p.shortcode for p in full.posts}
+    assert ig.source(source_id)["completed_through"] == 1000
+
+
+def test_recent_scan_old_streaks_are_separate_and_tolerate_pinned_posts(tmp_path, monkeypatch):
+    import shorts_local.instagram as target
+
+    ig = InstagramStore(Store(tmp_path))
+    source = ig.add_source("pets", now=100)
+    ig.apply_scan(batch(source, started_at=1000), now=1000)
+    source = ig.source(source["id"])
+    monkeypatch.setattr(target.time, "time", lambda: 1100)
+    values = [sdk_post(f"PinnedP{i}", 10) for i in range(19)] + [sdk_post("NewPost", 1050)]
+    reels = [sdk_post(f"PinnedR{i}", 10) for i in range(19)] + [sdk_post("NewReel", 1050)]
+    values.extend(sdk_post(f"OldP{i}", 10) for i in range(205))
+    reels.extend(sdk_post(f"OldR{i}", 10) for i in range(205))
+    seen = []
+    install_scan(monkeypatch, target, values, reels=reels, seen=seen)
+    folder = tmp_path / "scan"
+    atomic_json(folder / "request.json", {"run_id": "a" * 32, "source": source})
+    target.scan_source(tmp_path, source, folder)
+    result = ScanBatch.model_validate_json((folder / "result.json").read_text())
+    assert result.complete and len(seen) < 100
+    assert {p.shortcode for p in result.posts} == {"NewPost", "NewReel"}
+    ig.apply_scan(result, now=1100)
+    assert ig.source(source["id"])["completed_through"] == 1000
+
+
+def test_deep_full_scan_checks_both_new_heads_without_losing_tail_progress(tmp_path, monkeypatch):
+    import shorts_local.instagram as target
+
+    ig = InstagramStore(Store(tmp_path))
+    source = ig.add_source("pets", now=100)
+    clock = [1000]
+    monkeypatch.setattr(target.time, "time", lambda: clock[0])
+    values = [sdk_post(f"OldP{i}", 10) for i in range(1000)]
+    reels = [sdk_post(f"OldR{i}", 10) for i in range(1000)]
+    seen = []
+    install_scan(monkeypatch, target, values, reels=reels, seen=seen)
+    folder = tmp_path / "scan"
+    atomic_json(folder / "request.json", {"run_id": "a" * 32, "source": source})
+    target.scan_source(tmp_path, source, folder)
+    first = ScanBatch.model_validate_json((folder / "result.json").read_text())
+    assert not first.complete
+    ig.apply_scan(first, now=1000)
+    values.insert(0, sdk_post("NewPost", 1100))
+    reels.insert(0, sdk_post("NewReel", 1100))
+    clock[0] = 1300
+    seen.clear()
+    source = ig.source(source["id"])
+    atomic_json(folder / "request.json", {"run_id": "b" * 32, "source": source})
+    target.scan_source(tmp_path, source, folder)
+    second = ScanBatch.model_validate_json((folder / "result.json").read_text())
+    assert {p.shortcode for p in second.posts} == {"NewPost", "NewReel"}
+    assert ("posts", "OldP150") in seen and ("reels", "OldR150") in seen
+    assert len(seen) == 200 and not second.complete
+    assert second.started_at == 1000
+    ig.apply_scan(second, now=1300)
+    assert ig.source(source["id"])["completed_through"] is None
+
+
+def test_legacy_full_cursor_resumes_even_with_recent_watermark(tmp_path, monkeypatch):
+    import shorts_local.instagram as target
+
+    source = InstagramStore(Store(tmp_path)).add_source("pets", now=100)
+    monkeypatch.setattr(target.time, "time", lambda: 1000)
+    values = [sdk_post(f"V{i}", 200) for i in range(205)]
+    install_scan(monkeypatch, target, values)
+    folder = tmp_path / "scan"
+    atomic_json(folder / "request.json", {"run_id": "a" * 32, "source": source})
+    target.scan_source(tmp_path, source, folder)
+    first = ScanBatch.model_validate_json((folder / "result.json").read_text())
+    source["cursor"] = {key: first.cursor[key] for key in ("feeds", "done", "next", "started_at")}
+    source["completed_through"] = 900
+    target.scan_source(tmp_path, source, folder)
+    second = ScanBatch.model_validate_json((folder / "result.json").read_text())
+    assert second.complete and second.started_at == 1000
+    assert {p.shortcode for p in [*first.posts, *second.posts]} == {f"V{i}" for i in range(205)}
+
+
+def test_full_continuation_probes_a_previously_exhausted_feed(tmp_path, monkeypatch):
+    import shorts_local.instagram as target
+
+    source = InstagramStore(Store(tmp_path)).add_source("pets", now=100)
+    values = [sdk_post(f"Old{i}", 10) for i in range(205)]
+    reels = []
+    install_scan(monkeypatch, target, values, reels=reels)
+    folder = tmp_path / "scan"
+    atomic_json(folder / "request.json", {"run_id": "a" * 32, "source": source})
+    target.scan_source(tmp_path, source, folder)
+    first = ScanBatch.model_validate_json((folder / "result.json").read_text())
+    assert not first.complete and first.cursor["done"] == ["reels"]
+    source["cursor"] = first.cursor
+    reels.append(sdk_post("NewReel", 200))
+    target.scan_source(tmp_path, source, folder)
+    second = ScanBatch.model_validate_json((folder / "result.json").read_text())
+    assert second.complete and {p.shortcode for p in second.posts} == {"NewReel"}
 
 
 def test_renamed_source_never_switches_numeric_identity(tmp_path, monkeypatch):

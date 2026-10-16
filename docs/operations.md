@@ -40,6 +40,13 @@ Run `.venv/bin/shorts-local` from the project folder to use the optional depende
 
 `update` checks the latest GitHub release. It fetches the release tag and runs `uv sync` with the currently installed extras only when this repository's checkout is clean and `serve` is stopped. If there are local changes or a running service, it stops and reports the reason. Telegram's `/update` only checks for updates.
 
+## Story completion and recovery
+
+- A new story video must pass a full FFmpeg decode before it becomes final. Its `validation.json` binds the job's original settings to hashes of `video.mp4`, `story.json` (including publication metadata), and the timeline.
+- Retain `story.json` and `validation.json` with the video. A matching completed video can be retried or published without narration clips, generated images, or model loading, even below the disk-space threshold for new generation. A retained timeline must still match its hash; an absent timeline does not prevent publishing.
+- Existing videos with an older media-only report, or no report after an interruption, receive a full decode check before being adopted without rerendering. Any existing upload session or receipt must match the original video bytes first.
+- Changed or missing files on a job that has started uploading are blocked instead of regenerated. A damaged local video without upload records may be rebuilt. If a sealed script changes, restore its original bytes or create a new job with `create --story new-story.json`; old narration is not silently paired with an edited script.
+
 ## Interrupted uploads
 
 `upload-state.json` contains a secret session URL, the file hash, and the target channel. The app queries the server for the session's status and resumes the upload.
@@ -84,6 +91,8 @@ Using multiple channels does not increase the Google project's shared quota. Whe
 ### Instagram collection, authentication, and migration
 
 - Collection runs separately from the shared AI worker, with limits of 120 seconds and 200 items per account. Incomplete pages are checked again after five minutes by default. Temporary errors use exponential backoff from five minutes to six hours. Rate limits wait for the specified duration, or at least one hour.
+- After an initial full scan, routine scans stop independently for posts and reels after 20 consecutive posts older than the last full scan's start (or source registration). One old or pinned post does not stop collection. A full rescan is due one day after the previous full scan finishes; deeply out-of-order or delayed entries may wait for that rescan. Recent scans do not advance the full-scan watermark.
+- When a scan resumes a saved tail, it first probes up to 20 fresh items from each feed within the same 200-item budget. This checks for new head posts without discarding historical progress, including when one feed has already been exhausted. Checkpoint metadata and the full-rescan completion time survive restarts.
 - `source scan` and Telegram's `/source_scan` respect global, channel, and source pauses, as well as shared server backoff. The Telegram command schedules collection and responds immediately.
 - `auth_wait` does not use a retry attempt. Reconnecting with `instagram-login USERNAME` automatically requeues affected jobs under the existing date and pause rules. A manual `retry` overrides date-based skipping but does not resolve the authentication problem itself.
 - If the database update is interrupted after a new session file is saved, the next service or worker run recovers it. Existing jobs retain the mode, style, and source values set when they were created, rather than taking the current channel settings.

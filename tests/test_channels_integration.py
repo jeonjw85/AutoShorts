@@ -106,6 +106,7 @@ def test_pipeline_uses_job_profile_after_selection_and_settings_change(tmp_path,
     def planner(settings, recent, folder):
         assert settings.topic == "원래 동물 주제"
         assert recent == ["동물의 옛 제목"]
+        atomic_json(folder / "story.json", story_data)
         return Story(**story_data)
 
     monkeypatch.setattr(pipeline, "plan_story", planner)

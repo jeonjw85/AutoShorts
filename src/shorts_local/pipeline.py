@@ -1,10 +1,12 @@
 import hashlib
 import importlib.util
+import json
 import shutil
 import sqlite3
 import sys
 from pathlib import Path
 
+from .artifacts import artifact_key
 from .config import Settings
 from .engines import images_complete, speech_complete
 from .instagram import InstagramError
@@ -12,7 +14,7 @@ from .instagram_store import InstagramStore
 from .models import Story, VideoMetadata
 from .news_fetch import UnsupportedArticle
 from .planning import plan_story
-from .process import BlockedError, QuotaError, exclusive_lock, run_process
+from .process import BlockedError, QuotaError, atomic_json, exclusive_lock, run_process
 from .profiles import UploadTarget
 from .render import render_video, validate_video
 from .store import Store
@@ -20,6 +22,7 @@ from .youtube import (
     YouTubeUploader,
     auth_path,
     completed_upload,
+    file_hash,
     identify_channel,
     legacy_token_provider,
     read_auth,
@@ -74,21 +77,89 @@ def publish_video(store: Store, job: dict, video: Path, metadata: VideoMetadata,
                                target=target, legacy=legacy_state)
 
 
+def _story_key(job: dict) -> str:
+    # Use the stored snapshot, not defaults introduced by a later application version.
+    return artifact_key("story-job", {key: job[key] for key in ("id", "channel_id", "settings")})
+
+
+def _seal_story_video(job: dict, folder: Path, report: dict):
+    timeline = folder / "timeline.json"
+    atomic_json(folder / "validation.json", {
+        "schema": 1, "kind": "story-final", "job_key": _story_key(job),
+        "video_sha256": file_hash(folder / "video.mp4"),
+        "story_sha256": file_hash(folder / "story.json"),
+        "timeline_sha256": file_hash(timeline) if timeline.exists() else None, "media": report,
+    })
+
+
+def _ready_story_video(job: dict, folder: Path, settings: Settings):
+    video, script, timeline = folder / "video.mp4", folder / "story.json", folder / "timeline.json"
+    uploads = [folder / name for name in ("upload-state.json", "upload-receipt.json")
+               if (folder / name).exists()]
+    if not video.exists() and not uploads and not (folder / "validation.json").exists():
+        return None
+    try:
+        path = folder / "validation.json"
+        seal = json.loads(path.read_text()) if path.exists() else None
+        if isinstance(seal, dict) and ("schema" in seal or "kind" in seal):
+            if (seal["schema"] != 1 or seal["kind"] != "story-final"
+                    or seal["job_key"] != _story_key(job)):
+                raise ValueError("이야기 완성 기록의 작업/설정이 다릅니다.")
+            try:
+                script_hash = file_hash(script)
+            except OSError:
+                raise BlockedError("완성한 이야기의 대본이 없습니다. 원본 대본을 복구하세요.") from None
+            if seal["story_sha256"] != script_hash:
+                raise BlockedError("완성한 이야기의 대본이 변경되었습니다. 새 대본은 새 작업으로 제작하세요.")
+            if (seal["video_sha256"] != file_hash(video)
+                    or timeline.exists() and seal["timeline_sha256"] != file_hash(timeline)):
+                raise ValueError("이야기 완성 기록과 파일이 다릅니다.")
+            validate_video(video, settings)
+        else:
+            # Older story outputs have only a media report (or no report after a crash).
+            # Verify actual bytes before adopting them; never regenerate an upload's source.
+            if seal is not None and (not isinstance(seal, dict) or not
+                    {"duration", "width", "height", "audio_codec", "video_codec"} <= seal.keys()):
+                raise ValueError("이야기 완성 기록을 읽을 수 없습니다.")
+            digest = file_hash(video)
+            for upload in uploads:
+                record = read_upload_artifact(upload)
+                if (record.get("sha256") != digest or upload.name == "upload-state.json"
+                        and record.get("size") != video.stat().st_size):
+                    raise BlockedError("업로드 중인 이야기의 영상 파일과 복구 기록이 다릅니다.")
+            report = validate_video(video, settings, full_decode=True)
+            Story.model_validate_json(script.read_text())
+            _seal_story_video(job, folder, report)
+        return video, Story.model_validate_json(script.read_text())
+    except BlockedError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        if uploads:
+            raise BlockedError("업로드가 시작된 이야기의 완성 기록/파일이 다릅니다. 복구 확인이 필요합니다.") from None
+        return None
+
+
 def _prepare_story(store: Store, job: dict, folder: Path, settings: Settings):
-    if shutil.disk_usage(folder).free < 5 * 1024**3:
-        raise BlockedError("디스크 여유 공간이 5GB 미만입니다. 공간 확보 후 재시도하세요.")
-    store.update(job["id"], stage="plan")
-    if (folder / "story.json").exists():
-        story = Story.model_validate_json((folder / "story.json").read_text())
+    ready = _ready_story_video(job, folder, settings)
+    if ready:
+        video, story = ready
     else:
-        recent = [item["title"] for item in store.list(100, channel_id=job["channel_id"])
-                  if item["title"] and item["id"] != job["id"]]
-        story = plan_story(settings, recent, folder)
+        if shutil.disk_usage(folder).free < 5 * 1024**3:
+            raise BlockedError("디스크 여유 공간이 5GB 미만입니다. 공간 확보 후 재시도하세요.")
+        store.update(job["id"], stage="plan")
+        if (folder / "story.json").exists():
+            story = Story.model_validate_json((folder / "story.json").read_text())
+        else:
+            recent = [item["title"] for item in store.list(100, channel_id=job["channel_id"])
+                      if item["title"] and item["id"] != job["id"]]
+            story = plan_story(settings, recent, folder)
     fingerprint = hashlib.sha256("\n".join(x.narration for x in story.scenes).encode()).hexdigest()
     try:
         store.update(job["id"], title=story.title, fingerprint=fingerprint)
     except sqlite3.IntegrityError:
         raise BlockedError("다른 작업과 동일한 대본입니다. 새 작업을 생성하세요.") from None
+    if ready:
+        return video, story
     store.update(job["id"], stage="speech")
     if not speech_complete(story, folder):
         engine("speech", folder, settings)
@@ -96,11 +167,8 @@ def _prepare_story(store: Store, job: dict, folder: Path, settings: Settings):
     if settings.visuals == "mflux" and not images_complete(story, folder):
         engine("images", folder, settings)
     store.update(job["id"], stage="render")
-    video = folder / "video.mp4"
-    if video.exists():
-        validate_video(video, settings)
-    else:
-        video = render_video(story, folder, settings)
+    video = render_video(story, folder, settings)
+    _seal_story_video(job, folder, validate_video(video, settings))
     return video, story
 
 
