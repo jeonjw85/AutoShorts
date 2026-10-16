@@ -82,7 +82,7 @@ def render_video(story: Story, workdir: Path, settings: Settings) -> Path:
         "-i", "scenes.txt", "-c:v", "copy", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
         "-c:a", "aac", "-ar", "48000", "-movflags", "+faststart", str(temp),
     ], workdir / "render.log", settings.stage_timeout, cwd=segments)
-    report = validate_video(temp, settings)
+    report = validate_video(temp, settings, full_decode=True)
     os.replace(temp, output)
     (workdir / "captions.srt").write_text("\n".join(captions))
     atomic_json(workdir / "timeline.json", timeline)
