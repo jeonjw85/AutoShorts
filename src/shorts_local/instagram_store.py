@@ -149,6 +149,8 @@ class InstagramStore:
                      post.url, post.author, post.owner_id, post.published_at, post.caption,
                      post.media_type, now, status, None if status == "available" else "단일 영상이 아닙니다."))
             interval = self.store.profile(source["channel_id"]).settings.instagram_poll_minutes * 60
+            full_complete = (batch.complete and not batch.error_code
+                             and (batch.cursor or {}).get("mode") != "recent")
             db.execute("""UPDATE instagram_sources SET instagram_id=COALESCE(instagram_id,?),
                 resolved_username=COALESCE(?,resolved_username),cursor=?,scan_revision=scan_revision+1,
                 completed_through=CASE WHEN ? THEN ? ELSE completed_through END,
@@ -156,7 +158,7 @@ class InstagramStore:
                 next_run=?,status='ready',failure_count=CASE WHEN ? THEN 0 ELSE failure_count END,
                 error=CASE WHEN ? THEN NULL ELSE error END WHERE id=?""",
                 (batch.account_id, batch.username, json.dumps(batch.cursor) if batch.cursor else None,
-                 batch.complete, batch.started_at, not batch.error_code, now,
+                 full_complete, batch.started_at, not batch.error_code, now,
                  max(now + (interval if batch.complete else 300), batch.retry_at or 0),
                  not batch.error_code, not batch.error_code, source["id"]))
             if not batch.error_code:

@@ -63,6 +63,72 @@ def test_partial_scan_failure_preserves_watermark(tmp_path, monkeypatch):
     assert after["failure_count"] == 1
 
 
+def test_recent_completion_preserves_full_watermark_and_success_schedule(tmp_path):
+    ig = InstagramStore(Store(tmp_path))
+    source = ig.add_source("pets", now=100)
+    ig.apply_scan(batch(source, started_at=300), now=500)
+    source = ig.source(source["id"])
+    metadata = {"mode": "recent", "full_scan_at": 500}
+    ig.apply_scan(batch(source, started_at=600, cursor=metadata), now=700)
+    after = ig.source(source["id"])
+    assert after["completed_through"] == 300
+    assert after["cursor"] == metadata
+    assert after["last_success"] == 700
+    assert after["next_run"] == 700 + ig.store.profile().settings.instagram_poll_minutes * 60
+
+
+def test_interrupted_head_probe_recovers_full_cursor_and_shared_wait(tmp_path, monkeypatch):
+    import shorts_local.collector as collector
+    import shorts_local.instagram as adapter
+    from tests.test_instagram_adapter import install_scan, sdk_post
+
+    s = Store(tmp_path)
+    ig = InstagramStore(s)
+    source = ig.add_source("pets", now=100)
+    clock = [1000]
+    monkeypatch.setattr(adapter.time, "time", lambda: clock[0])
+    values = [sdk_post(f"Old{i}", 10) for i in range(1000)]
+    install_scan(monkeypatch, adapter, values)
+
+    def child(args, log, timeout):
+        request = json.loads((log.parent / "request.json").read_text())
+        adapter.scan_source(tmp_path, request["source"], log.parent)
+
+    monkeypatch.setattr(collector, "run_process", child)
+    collector.run_collection(tmp_path, now=1000)
+    original = ig.source(source["id"])
+    assert original["cursor"] and original["completed_through"] is None
+    values.insert(0, sdk_post("New", 1100))
+    convert = adapter._post_value
+
+    def interrupted(post):
+        if post.shortcode == "Old0":
+            raise adapter.InstagramError("deferred", retry_at=2000)
+        return convert(post)
+
+    monkeypatch.setattr(adapter, "_post_value", interrupted)
+    clock[0] = 1300
+    apply = InstagramStore.apply_scan
+    monkeypatch.setattr(InstagramStore, "apply_scan", lambda *a, **kw: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        collector.run_collection(tmp_path, now=1300)
+    monkeypatch.setattr(InstagramStore, "apply_scan", apply)
+    assert collector.run_collection(tmp_path, now=1300) == source["id"]
+    after = ig.source(source["id"])
+    assert after["cursor"] == original["cursor"]
+    assert after["completed_through"] is None and after["last_success"] == 1000
+    assert s.value("instagram_next_run") == 2000
+    assert {p["shortcode"] for p in ig.materials()} == {"New"}
+    assert collector.run_collection(tmp_path, now=1999) is None
+    monkeypatch.setattr(adapter, "_post_value", convert)
+    clock[0] = 2000
+    assert collector.run_collection(tmp_path, now=2000) == source["id"]
+    resumed = ig.source(source["id"])
+    assert resumed["cursor"]["started_at"] == original["cursor"]["started_at"]
+    assert resumed["cursor"]["feeds"] != original["cursor"]["feeds"]
+    assert resumed["completed_through"] is None
+
+
 def test_session_generation_recovers_only_auth_wait_jobs(tmp_path, monkeypatch):
     s = Store(tmp_path)
     ig = InstagramStore(s)

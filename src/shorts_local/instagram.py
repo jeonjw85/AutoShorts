@@ -28,6 +28,9 @@ from .store import Store
 from .youtube import file_hash
 
 MAX_SOURCE_BYTES = 300 * 1024**2
+FULL_RESCAN_SECONDS = 86400
+OLD_POST_STREAK = 20
+HEAD_PROBE_ITEMS = 20
 MESSAGES = {
     "busy": "다른 인스타그램 요청이 실행 중입니다.",
     "deferred": "인스타그램 요청 간격을 기다립니다.",
@@ -194,7 +197,22 @@ def scan_source(root: Path, source: dict, workdir: Path) -> None:
     from instaloader.nodeiterator import FrozenNodeIterator
 
     request = json.loads((workdir / "request.json").read_text())
-    cursor = source["cursor"] or {"feeds": {}, "done": [], "next": 0, "started_at": time.time()}
+    cursor = source["cursor"] or {}
+    # Keep completion time separately from the full walk's start watermark, so
+    # a long-running walk does not immediately trigger another full rescan.
+    full_scan_at = cursor.get("full_scan_at", source.get("completed_through"))
+    full_due = full_scan_at is None or time.time() - full_scan_at >= FULL_RESCAN_SECONDS
+    resuming = "feeds" in cursor and "started_at" in cursor
+    if not resuming or (cursor.get("mode") == "recent" and full_due):
+        cursor = {"feeds": {}, "done": [], "next": 0, "started_at": time.time(),
+                  "mode": "full" if full_due else "recent", "full_scan_at": full_scan_at,
+                  "old_streak": {}}
+        resuming = False
+    else:
+        cursor.setdefault("mode", "full")  # Legacy cursors always finish their full walk.
+        cursor.setdefault("full_scan_at", full_scan_at)
+        cursor.setdefault("old_streak", {})
+    cutoff = max(source["registered_at"], source.get("completed_through") or 0)
     result = ScanBatch(run_id=request["run_id"], source_id=source["id"],
                        base_revision=source["scan_revision"], started_at=cursor["started_at"],
                        cursor=cursor)
@@ -207,7 +225,11 @@ def scan_source(root: Path, source: dict, workdir: Path) -> None:
                 cursor["feeds"][name] = iterator.freeze()._asdict()
         result.posts = list(posts.values())
         result.complete = len(cursor["done"]) == 2 and result.error_code is None
-        result.cursor = None if result.complete else cursor
+        result.cursor = cursor
+        if result.complete:
+            result.cursor = {"mode": cursor["mode"], "full_scan_at": (
+                time.time() if cursor["mode"] == "full" else cursor["full_scan_at"]
+            )}
         atomic_json(workdir / "result.json", result.model_dump())
 
     try:
@@ -216,11 +238,37 @@ def scan_source(root: Path, source: dict, workdir: Path) -> None:
         profile = (sdk.Profile.from_id(loader.context, int(source["instagram_id"]))
                    if source["instagram_id"] else sdk.Profile.from_username(loader.context, source["username"]))
         result.account_id, result.username = str(profile.userid), profile.username
+        consumed = 0
+        if resuming:
+            # Frozen tails do not contain newly published heads. Keep these probes
+            # separate so a wait/interruption cannot replace durable tail progress.
+            checkpoint()
+            for name in ("posts", "reels"):
+                if time.monotonic() >= deadline:
+                    break
+                head = getattr(profile, f"get_{name}")()
+                for _ in range(HEAD_PROBE_ITEMS):
+                    if time.monotonic() >= deadline:
+                        break
+                    try:
+                        post = _post_value(next(head))
+                    except StopIteration:
+                        break
+                    consumed += 1
+                    if post.published_at >= source["registered_at"]:
+                        posts[post.shortcode] = post
+                    checkpoint()
         for name in ("posts", "reels"):
             if name in cursor["done"]:
                 continue
+            if time.monotonic() >= deadline:
+                checkpoint()
+                return
             iterator = getattr(profile, f"get_{name}")()
             frozen = cursor["feeds"].get(name)
+            # Thaw replays the last node. Reset conservatively rather than count
+            # that old node twice and stop a resumed recent scan too early.
+            cursor["old_streak"][name] = 0
             if frozen and (frozen.get("best_before") or 0) > time.time():
                 try:
                     iterator.thaw(FrozenNodeIterator(**frozen))
@@ -228,7 +276,6 @@ def scan_source(root: Path, source: dict, workdir: Path) -> None:
                     pass  # Restart this feed at its head; shortcode uniqueness makes replay safe.
             feeds[name] = iterator
         checkpoint()
-        consumed = 0
         while len(cursor["done"]) < 2 and consumed < 200 and time.monotonic() < deadline:
             name = ("posts", "reels")[cursor["next"]]
             cursor["next"] = 1 - cursor["next"]
@@ -242,6 +289,13 @@ def scan_source(root: Path, source: dict, workdir: Path) -> None:
                 consumed += 1
                 if post.published_at >= source["registered_at"]:
                     posts[post.shortcode] = post
+                if cursor["mode"] == "recent":
+                    # One old/pinned post cannot hide later new posts. Arbitrarily
+                    # out-of-order or delayed posts are recovered by the daily full scan.
+                    cursor["old_streak"][name] = (cursor["old_streak"][name] + 1
+                                                   if post.published_at < cutoff else 0)
+                    if cursor["old_streak"][name] >= OLD_POST_STREAK:
+                        cursor["done"].append(name)
             checkpoint()
     except Exception as exc:
         error = classify_error(exc)
