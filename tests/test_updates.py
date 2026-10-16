@@ -69,7 +69,7 @@ def test_update_applies_only_a_newer_release_on_the_matching_clean_checkout(tmp_
     current = CliRunner().invoke(app, ["--home", str(tmp_path / "home"), "update"])
     assert current.exit_code == 0, current.output
     assert calls == []
-    assert "0.1.0" in current.output
+    assert current.output.strip() == f"{project_version()} 최신 릴리즈입니다."
 
 
 def test_update_refuses_dirty_checkout_wrong_remote_and_running_service(tmp_path, monkeypatch):
