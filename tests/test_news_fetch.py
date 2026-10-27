@@ -112,3 +112,65 @@ def test_unrelated_time_uses_rss_or_rejects_missing_publication():
     assert extract_article("https://example.com/a", page, rss_published_at=100).published_at == 100
     with pytest.raises(UnsupportedArticle):
         extract_article("https://example.com/a", page)
+
+
+def test_jsonld_graph_supplies_body_date_headline_and_image():
+    import json
+    from datetime import datetime
+
+    from shorts_local.news_fetch import extract_article
+
+    payload = {"@context": "https://schema.org", "@graph": [
+        {"@type": "NewsArticle", "headline": "JSON-LD 제목",
+         "datePublished": "2026-10-12T01:00:00+09:00",
+         "articleBody": "본문 " * 250,
+         "image": {"url": "https://example.com/i.jpg"}}]}
+    page = ('<html><head><script type="application/ld+json">'
+            + json.dumps(payload, ensure_ascii=False)
+            + '</script></head><body><div><p>짧음</p></div></body></html>')
+    doc = extract_article("https://example.com/a", page, rss_published_at=1)
+    assert doc.title == "JSON-LD 제목"
+    assert doc.body.startswith("본문")
+    assert doc.image_url == "https://example.com/i.jpg"
+    assert doc.published_at == datetime.fromisoformat("2026-10-12T01:00:00+09:00").timestamp()
+
+
+def test_jsonld_accepts_top_level_array_and_keeps_meta_priority():
+    import json
+
+    from shorts_local.news_fetch import extract_article
+
+    blocks = [{"@type": "NewsArticle", "datePublished": "2026-10-13T00:00:00Z",
+               "articleBody": "배열 본문 " * 100}]
+    page = ('<html><head><meta property="article:published_time" content="2026-10-11T23:00:00Z">'
+            '<script type="application/ld+json">' + json.dumps(blocks, ensure_ascii=False)
+            + '</script></head><body><article><p>' + "본문 " * 250 + '</p></article></body></html>')
+    doc = extract_article("https://example.com/a", page, rss_published_at=1)
+    assert doc.published_at == DATE
+    assert doc.body.startswith("본문")
+
+
+def test_jsonld_body_is_whitespace_normalized():
+    from shorts_local.news_fetch import extract_article
+
+    html = """
+    <html><head><script type="application/ld+json">
+    {"@type": "NewsArticle", "datePublished": "2026-10-20T09:00:00+09:00",
+     "articleBody": "%s"}
+    </script></head><body><article>짧은 요약</article></body></html>
+    """ % ("첫 줄  둘째   줄 " * 60)
+    doc = extract_article("https://example.com/a", html)
+    assert "  " not in doc.body
+    assert doc.body.startswith("첫 줄 둘째 줄")
+
+
+def test_long_paragraph_backs_up_a_short_article():
+    from shorts_local.news_fetch import extract_article
+
+    body = "본문 " * 220
+    html = f"""
+    <html><head><meta property="article:published_time" content="2026-10-20T09:00:00+09:00"></head>
+    <body><article>짧은 요약</article><p>{body}</p></body></html>
+    """
+    doc = extract_article("https://example.com/a", html)
+    assert doc.body == body.strip()

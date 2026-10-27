@@ -35,6 +35,9 @@ def youtube_network(monkeypatch):
         identity = request.headers["authorization"].removeprefix("Bearer ")
         if request.url.path == "/youtube/v3/channels":
             return httpx.Response(200, json={"items": [{"id": identity, "snippet": {"title": "test"}}]})
+        if request.url.path == "/youtube/v3/videos":
+            return httpx.Response(200, json={"items": [{"status": {"uploadStatus": "uploaded",
+                                                                   "privacyStatus": "public"}}]})
         transfers.append((request.method, identity))
         if request.method == "POST":
             return httpx.Response(200, headers={"Location": SESSION})
@@ -276,3 +279,40 @@ def test_interrupted_reconcile_recovers_on_ordinary_retry(legacy_home, story_dat
     assert publish_video(restarted, restarted.get(job_id), video, Story(**story_data), folder) == "video123456"
     assert restarted.get(job_id)["target_youtube_id"] == A
     assert transfers == []
+
+
+def test_publish_keeps_a_fresh_upload_and_warns_once_about_privacy(tmp_path, story_data, monkeypatch):
+    from shorts_local.pipeline import publish_video
+
+    youtube_network(monkeypatch)
+    s = Store(tmp_path)
+    s.add_profile("animals", "동물")
+    connect(s, "animals", A)
+    job = s.enqueue(Settings(privacy="private"), channel_id="animals")
+    folder = prepare_media(s, job, story_data)
+    (folder / "video.mp4").write_bytes(b"video")
+    assert publish_video(s, s.get(job), folder / "video.mp4", Story(**story_data), folder) == "video123456"
+    receipt = json.loads((folder / "upload-receipt.json").read_text())
+    assert receipt["privacy_status"] == "public" and receipt["privacy_warning_sent"] is True
+    assert s.notification_count() == 1 and "public" in s.notifications()[0]["text"]
+    assert publish_video(s, s.get(job), folder / "video.mp4", Story(**story_data), folder) == "video123456"
+    assert s.notification_count() == 1
+
+
+def test_publish_warns_on_the_already_uploaded_path(tmp_path, story_data):
+    from shorts_local.pipeline import publish_video
+    from shorts_local.youtube import file_hash
+
+    s = Store(tmp_path)
+    s.add_profile("animals", "동물")
+    s.bind_channel("animals", A, "동물")
+    job = s.enqueue(Settings(privacy="private"), channel_id="animals")
+    folder = prepare_media(s, job, story_data)
+    video = folder / "video.mp4"
+    video.write_bytes(b"video")
+    atomic_json(folder / "upload-receipt.json", {
+        "video_id": "video123456", "sha256": file_hash(video),
+        "channel_id": "animals", "youtube_channel_id": A, "privacy_status": "unlisted",
+    })
+    assert publish_video(s, s.get(job), video, Story(**story_data), folder) == "video123456"
+    assert s.notification_count() == 1 and "unlisted" in s.notifications()[0]["text"]

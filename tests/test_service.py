@@ -316,3 +316,198 @@ def test_invalid_or_unauthorized_commands_do_not_change_channel(tmp_path):
     assert s.value("telegram_channel") == "animals"
     assert s.profile("animals").settings.schedule_time == "09:00"
     assert s.profile("animals").settings.schedule_enabled
+
+
+def test_serve_without_bot_writes_heartbeat_and_drains_alerts(tmp_path, monkeypatch):
+    import threading
+
+    from shorts_local import service
+    from shorts_local.health import read_heartbeat
+    from shorts_local.store import Store
+
+    class FakeTime:
+        @staticmethod
+        def time():
+            return 1000.0
+
+        @staticmethod
+        def sleep(seconds):
+            assert seconds == 5
+            stop.set()
+
+    stop = threading.Event()
+    monkeypatch.setattr(service, "time", FakeTime)
+    monkeypatch.setattr(service, "credentials", lambda root: None)
+    monkeypatch.setattr(service, "run_next", lambda root: None)
+    monkeypatch.setattr(service, "run_collection", lambda root: None)
+    monkeypatch.setattr(service, "run_news_collection", lambda root: None)
+    store = Store(tmp_path)
+    store.notify("알림")
+    service.serve(tmp_path, stop)
+    heartbeat = read_heartbeat(tmp_path)
+    assert heartbeat["pid"] > 0 and heartbeat["updated_at"] == 1000.0
+    assert store.notification_count() == 0
+    assert "알림" in (tmp_path / "alerts.log").read_text()
+
+
+def test_serve_survives_heartbeat_write_failure(tmp_path, monkeypatch):
+    import threading
+
+    from shorts_local import service
+    from shorts_local.health import read_heartbeat
+    from shorts_local.store import Store
+
+    class FakeTime:
+        @staticmethod
+        def time():
+            return 1000.0
+
+        @staticmethod
+        def sleep(seconds):
+            stop.set()
+
+    def broken_heartbeat(*args, **kwargs):
+        raise OSError("read-only file system")
+
+    stop = threading.Event()
+    monkeypatch.setattr(service, "time", FakeTime)
+    monkeypatch.setattr(service, "write_heartbeat", broken_heartbeat)
+    monkeypatch.setattr(service, "credentials", lambda root: None)
+    monkeypatch.setattr(service, "run_next", lambda root: None)
+    monkeypatch.setattr(service, "run_collection", lambda root: None)
+    monkeypatch.setattr(service, "run_news_collection", lambda root: None)
+    service.serve(tmp_path, stop)
+    assert read_heartbeat(tmp_path) is None
+    assert Store(tmp_path).value("paused", False) is False
+
+
+def test_telegram_status_reports_service_and_pending_alerts(tmp_path):
+    from shorts_local.store import Store
+    from shorts_local.telegram import handle_update
+
+    store = Store(tmp_path)
+    store.notify("대기 알림")
+    reply = handle_update(store, update("/status"), 42)
+    assert "서비스:" in reply["text"]
+    assert "미전송 알림: 1건" in reply["text"]
+
+
+def test_serve_runs_the_token_age_check(tmp_path, monkeypatch):
+    import threading
+
+    from shorts_local import service
+    from shorts_local.store import Store
+
+    class FakeTime:
+        @staticmethod
+        def time():
+            return 10000.0
+
+        @staticmethod
+        def sleep(seconds):
+            stop.set()
+
+    stop = threading.Event()
+    calls = []
+    monkeypatch.setattr(service, "time", FakeTime)
+    monkeypatch.setattr(service, "credentials", lambda root: None)
+    monkeypatch.setattr(service, "run_next", lambda root: None)
+    monkeypatch.setattr(service, "run_collection", lambda root: None)
+    monkeypatch.setattr(service, "run_news_collection", lambda root: None)
+    monkeypatch.setattr(service, "warn_expiring_tokens", lambda store, now=None: calls.append(now))
+    Store(tmp_path)
+    service.serve(tmp_path, stop)
+    assert calls == [10000.0]
+
+
+def _serve_time(monkeypatch, service, stop):
+    class FakeTime:
+        @staticmethod
+        def time():
+            return 1000.0
+
+        @staticmethod
+        def sleep(seconds):
+            stop.set()
+
+    monkeypatch.setattr(service, "time", FakeTime)
+    monkeypatch.setattr(service, "credentials", lambda root: None)
+    monkeypatch.setattr(service, "run_next", lambda root: None)
+    monkeypatch.setattr(service, "run_collection", lambda root: None)
+    monkeypatch.setattr(service, "run_news_collection", lambda root: None)
+
+
+def test_serve_survives_a_notification_drain_failure(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+
+    from shorts_local import service
+    from shorts_local.store import Store
+
+    def broken_drain(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    stop = threading.Event()
+    _serve_time(monkeypatch, service, stop)
+    monkeypatch.setattr(service, "drain_notifications", broken_drain)
+    Store(tmp_path)
+    service.serve(tmp_path, stop)
+
+
+def test_serve_survives_a_queue_depth_failure(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+
+    from shorts_local import service
+    from shorts_local.health import read_heartbeat
+    from shorts_local.store import Store
+
+    def broken_depth(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    stop = threading.Event()
+    _serve_time(monkeypatch, service, stop)
+    monkeypatch.setattr(Store, "queue_depth", broken_depth)
+    Store(tmp_path)
+    service.serve(tmp_path, stop)
+    assert read_heartbeat(tmp_path) is None
+
+
+def test_serve_survives_a_scheduling_failure(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+
+    from shorts_local import service
+    from shorts_local.store import Store
+
+    def broken_profiles(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    stop = threading.Event()
+    _serve_time(monkeypatch, service, stop)
+    monkeypatch.setattr(Store, "profiles", broken_profiles)
+    Store(tmp_path)
+    service.serve(tmp_path, stop)
+
+
+def test_serve_survives_a_telegram_processing_failure(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+
+    from shorts_local import service
+    from shorts_local.store import Store
+
+    class FakeBot:
+        def close(self):
+            pass
+
+    def broken_process(store, bot):
+        raise sqlite3.OperationalError("database is locked")
+
+    stop = threading.Event()
+    _serve_time(monkeypatch, service, stop)
+    monkeypatch.setattr(service, "credentials", lambda root: ("id", "token"))
+    monkeypatch.setattr(service, "Telegram", lambda *auth: FakeBot())
+    monkeypatch.setattr(service, "process_telegram", broken_process)
+    Store(tmp_path)
+    service.serve(tmp_path, stop)

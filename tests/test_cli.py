@@ -1,3 +1,6 @@
+import json
+import shutil
+
 import pytest
 from typer.testing import CliRunner
 
@@ -218,3 +221,120 @@ def test_reconcile_cannot_race_a_running_worker(tmp_path):
     assert s.get(job)["target_youtube_id"] is None
     assert s.get(job)["status"] == "blocked"
     assert not (folder / "upload-receipt.json").exists()
+
+
+def test_cleanup_previews_by_default_and_applies_on_request(tmp_path):
+    import time
+
+    from shorts_local.cli import app
+    from shorts_local.config import Settings
+    from shorts_local.process import atomic_json
+    from shorts_local.store import Store
+
+    runner = CliRunner()
+    args = ["--home", str(tmp_path)]
+    runner.invoke(app, [*args, "init"])
+    store = Store(tmp_path)
+    job = store.enqueue(Settings())
+    folder = tmp_path / "jobs" / job
+    (folder / "voice").mkdir(parents=True)
+    atomic_json(folder / "validation.json", {"duration": 1})
+    (folder / "video.mp4").write_bytes(b"x")
+    store.update(job, status="ready")
+    with store.db() as db:
+        db.execute("UPDATE jobs SET updated=? WHERE id=?", (time.time() - 30 * 86400, job))
+
+    preview = runner.invoke(app, [*args, "cleanup"])
+    assert preview.exit_code == 0, preview.output
+    assert "voice" in preview.output and "--apply" in preview.output
+    assert (folder / "voice").exists()
+
+    applied = runner.invoke(app, [*args, "cleanup", "--apply"])
+    assert applied.exit_code == 0, applied.output
+    assert not (folder / "voice").exists()
+    assert (folder / "video.mp4").exists()
+
+
+def test_status_reports_heartbeat_and_pending_alerts(tmp_path):
+    from shorts_local.cli import app
+    from shorts_local.health import write_heartbeat
+    from shorts_local.store import Store
+
+    runner = CliRunner()
+    args = ["--home", str(tmp_path)]
+    runner.invoke(app, [*args, "init"])
+    Store(tmp_path).notify("대기 알림")
+
+    missing = runner.invoke(app, [*args, "status"])
+    assert missing.exit_code == 0, missing.output
+    assert "서비스: 기록 없음" in missing.output
+    assert "미전송 알림: 1건" in missing.output
+
+    write_heartbeat(tmp_path, version="0.1.3", pid=1, started_at=0,
+                    last_job_id=None, queue_depth=0, now=0)
+    assert "중단 의심" in runner.invoke(app, [*args, "status"]).output
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg 필요")
+def test_doctor_reports_heartbeat_and_pending_alerts(tmp_path):
+    from shorts_local.cli import app
+    from shorts_local.store import Store
+
+    runner = CliRunner()
+    args = ["--home", str(tmp_path)]
+    runner.invoke(app, [*args, "init"])
+    Store(tmp_path).notify("대기 알림")
+    result = runner.invoke(app, [*args, "doctor"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["pending_notifications"] == 1
+    assert report["heartbeat_age_seconds"] is None
+    assert report["alert_file_entries"] == 0
+
+
+def test_status_reports_alert_file_entries(tmp_path):
+    from shorts_local.cli import app
+    from shorts_local.health import append_alert
+
+    runner = CliRunner()
+    args = ["--home", str(tmp_path)]
+    runner.invoke(app, [*args, "init"])
+    append_alert(tmp_path, "보관된 알림")
+    result = runner.invoke(app, [*args, "status"])
+    assert result.exit_code == 0, result.output
+    assert "알림 파일: 1건" in result.output
+
+
+def test_status_lists_instagram_source_health(tmp_path):
+    from shorts_local.cli import app
+    from shorts_local.instagram_store import InstagramStore
+    from shorts_local.store import Store
+
+    runner = CliRunner()
+    args = ["--home", str(tmp_path)]
+    runner.invoke(app, [*args, "init"])
+    store = Store(tmp_path)
+    store.update_profile_settings("default", {"production_type": "instagram"})
+    InstagramStore(store).add_source("pets", now=100)
+    result = runner.invoke(app, [*args, "status"])
+    assert result.exit_code == 0, result.output
+    assert "@pets" in result.output
+    assert "연속 실패: 0" in result.output
+    assert "마지막 성공: -" in result.output
+
+
+def test_doctor_reports_channel_scoped_auth_wait(tmp_path):
+    import json
+
+    from shorts_local.cli import app
+    from shorts_local.store import Store
+
+    runner = CliRunner()
+    args = ["--home", str(tmp_path)]
+    runner.invoke(app, [*args, "init"])
+    Store(tmp_path).set_value("instagram_auth_wait_channels", ["animals"])
+    result = runner.invoke(app, [*args, "doctor"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["instagram"]["auth_wait"] is True
+    assert report["instagram"]["auth_wait_channels"] == ["animals"]

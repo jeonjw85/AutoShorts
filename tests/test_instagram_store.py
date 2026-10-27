@@ -156,3 +156,74 @@ def test_instagram_schedule_uses_local_date_across_dst(tmp_path):
     assert s.get(first)["dedup_key"] == "schedule:2026-11-01"
     second = schedule_due(s, now=before.replace(day=2, hour=6))
     assert s.get(second)["dedup_key"] == "schedule:2026-11-02"
+
+
+def test_auth_wait_is_scoped_to_one_channel(tmp_path):
+    from shorts_local.instagram import InstagramError, auth_wait_channels, check_wait
+    from shorts_local.instagram_store import InstagramStore
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.add_profile("animals", "동물")
+    ig = InstagramStore(store)
+    ig.add_source("pets", now=100)
+    ig.add_source("dogs", channel_id="animals", now=100)
+    store.set_value("instagram_auth_wait_channels", ["default"])
+
+    assert auth_wait_channels(store) == {"default"}
+    assert ig.channel_state("default")["auth_wait"] is True
+    assert ig.channel_state("animals")["auth_wait"] is False
+    assert ig.due_source(channel_id="animals", now=1000)["username"] == "dogs"
+    assert ig.due_source(channel_id="default", now=1000) is None
+    with pytest.raises(InstagramError):
+        check_wait(store, "default")
+    check_wait(store, "animals")
+
+
+def test_legacy_global_auth_wait_blocks_every_channel(tmp_path):
+    from shorts_local.instagram_store import InstagramStore
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.add_profile("animals", "동물")
+    store.set_value("instagram_auth_wait", True)
+    ig = InstagramStore(store)
+    ig.add_source("pets", now=100)
+    ig.add_source("dogs", channel_id="animals", now=100)
+    assert ig.channel_state("animals")["auth_wait"] is True
+    assert ig.due_source(channel_id="animals", now=1000) is None
+
+
+def test_failure_and_relogin_update_the_channel_list(tmp_path):
+    from shorts_local.instagram_store import InstagramStore
+    from shorts_local.process import atomic_json
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.add_profile("animals", "동물")
+    ig = InstagramStore(store)
+    pets = ig.add_source("pets", now=100)
+    dogs = ig.add_source("dogs", channel_id="animals", now=100)
+    ig.record_failure(pets["id"], "auth_wait", now=200)
+    assert store.value("instagram_auth_wait_channels") == ["default"]
+    ig.record_failure(dogs["id"], "auth_wait", now=200)
+    assert store.value("instagram_auth_wait_channels") == ["default", "animals"]
+
+    atomic_json(tmp_path / "auth/instagram.json", {
+        "username": "pets", "session": {"sessionid": "new"}, "generation": "c" * 32,
+    })
+    ig.reconcile_auth()
+    assert store.value("instagram_auth_wait_channels") == []
+
+
+def test_transient_backoff_is_jittered(tmp_path, monkeypatch):
+    import shorts_local.instagram_store as target
+    from shorts_local.instagram_store import InstagramStore
+    from shorts_local.store import Store
+
+    monkeypatch.setattr(target.random, "uniform", lambda low, high: 0.9)
+    store = Store(tmp_path)
+    ig = InstagramStore(store)
+    source = ig.add_source("pets", now=100)
+    ig.record_failure(source["id"], "transient", now=100)
+    assert ig.source(source["id"])["next_run"] == 100 + 270

@@ -72,9 +72,13 @@ class _ArticleHTML(HTMLParser):
         self.text = {"article": [], "main": [], "paragraph": [], "title": []}
         self.canonical = None
         self.dates = []
+        self.ld_blocks = []
+        self._ld_buffer = None
 
     def handle_starttag(self, tag, attributes):
         attrs = dict(attributes)
+        if tag == "script" and "ld+json" in (attrs.get("type") or "").lower():
+            self._ld_buffer = []
         skipped = tag in {"script", "style", "nav", "aside", "footer", "form", "noscript"}
         if self.stack:
             skipped |= self.stack[-1][1]
@@ -105,6 +109,9 @@ class _ArticleHTML(HTMLParser):
         self.stack.append((tag, skipped, region))
 
     def handle_endtag(self, tag):
+        if tag == "script" and self._ld_buffer is not None:
+            self.ld_blocks.append("".join(self._ld_buffer))
+            self._ld_buffer = None
         self.handle_data(" " if tag in {"p", "div", "article", "main", "li"} else "")
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index][0] == tag:
@@ -112,6 +119,9 @@ class _ArticleHTML(HTMLParser):
                 break
 
     def handle_data(self, data):
+        if self._ld_buffer is not None:
+            self._ld_buffer.append(data)
+            return
         if not self.stack or self.stack[-1][1]:
             return
         regions = {item[2] for item in self.stack}
@@ -122,12 +132,47 @@ class _ArticleHTML(HTMLParser):
             self.text["paragraph"].append(data)
 
 
+def _jsonld_objects(blocks: list[str]) -> list[dict]:
+    objects = []
+    for block in blocks:
+        try:
+            data = json.loads(block)
+        except ValueError:
+            continue
+        for item in data if isinstance(data, list) else [data]:
+            if not isinstance(item, dict):
+                continue
+            objects.append(item)
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                objects.extend(node for node in graph if isinstance(node, dict))
+    return objects
+
+
+def _jsonld_image(objects: list[dict]) -> str | None:
+    for item in objects:
+        image = item.get("image")
+        for value in image if isinstance(image, list) else [image]:
+            if isinstance(value, str) and value:
+                return value
+            if isinstance(value, dict) and isinstance(value.get("url"), str):
+                return value["url"]
+    return None
+
+
 def extract_article(url: str, html: str, *, rss_published_at: float | None = None) -> ArticleDocument:
     page = _ArticleHTML()
     page.feed(html)
     texts = {key: re.sub(r"\s+", " ", "".join(parts)).strip() for key, parts in page.text.items()}
-    body = texts["article"] or texts["main"] or texts["paragraph"]
+    objects = _jsonld_objects(page.ld_blocks)
+    jsonld_body = next((re.sub(r"\s+", " ", item["articleBody"]).strip() for item in objects
+                        if isinstance(item.get("articleBody"), str)
+                        and len(re.sub(r"\s+", " ", item["articleBody"]).strip()) >= 400), "")
+    body = next((text for text in (texts["article"], texts["main"], jsonld_body, texts["paragraph"])
+                 if len(text) >= 400), "")
     dates = [page.meta.get(key) for key in ("article:published_time", "datepublished", "parsely-pub-date", "pubdate")]
+    dates += [item.get("datePublished") for item in objects
+              if isinstance(item.get("datePublished"), str)]
     dates += [date for _, date in sorted(page.dates, key=lambda item: item[0])]
     published = next((parsed for date in dates if (parsed := parse_date(date)) is not None), rss_published_at)
     if len(body) < 400 or published is None:
@@ -141,9 +186,11 @@ def extract_article(url: str, html: str, *, rss_published_at: float | None = Non
                 canonical = candidate
         except ValueError:
             pass
-    image = page.meta.get("og:image")
+    headline = next((item["headline"].strip() for item in objects
+                     if isinstance(item.get("headline"), str) and item["headline"].strip()), "")
+    image = page.meta.get("og:image") or _jsonld_image(objects)
     return ArticleDocument(
-        title=(page.meta.get("og:title") or texts["title"] or "기사")[:500],
+        title=(page.meta.get("og:title") or headline or texts["title"] or "기사")[:500],
         site_name=(page.meta.get("og:site_name") or urlsplit(url).hostname)[:200],
         published_at=published, url=canonical, body=body,
         body_sha256=hashlib.sha256(body.encode()).hexdigest(),

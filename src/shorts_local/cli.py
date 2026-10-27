@@ -6,13 +6,17 @@ import plistlib
 import re
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import typer
 from pydantic import ValidationError
 
+from .cleanup import apply_cleanup, plan_cleanup
 from .config import Settings, initialize
+from .health import alerts_count, heartbeat_age, heartbeat_label
 from .instagram_store import InstagramStore
 from .models import Story
 from .news_store import NewsStore
@@ -92,9 +96,12 @@ def init(ctx: typer.Context):
 @app.command()
 def doctor(ctx: typer.Context):
     """설치 상태를 확인합니다. 네트워크 호출이나 모델 로딩을 하지 않습니다."""
+    from .instagram import auth_wait_channels
+
     root = ctx.obj
     settings = initialize(root)
     store = Store(root)
+    waiting = sorted(auth_wait_channels(store))
     from .youtube import auth_path, read_auth
 
     channels = []
@@ -110,8 +117,12 @@ def doctor(ctx: typer.Context):
                          "youtube_connected": connected, "youtube_channel_id": p.youtube_channel_id})
     from .updates import installed_version
 
+    age = heartbeat_age(root)
     report = {
         "version": installed_version(),
+        "heartbeat_age_seconds": None if age is None else round(age, 1),
+        "pending_notifications": store.notification_count(),
+        "alert_file_entries": alerts_count(root),
         "platform": f"{platform.system()} {platform.machine()}",
         "python": platform.python_version(),
         "free_disk_gb": round(shutil.disk_usage(root).free / 1024**3, 1),
@@ -130,7 +141,8 @@ def doctor(ctx: typer.Context):
             "whisper_installed": importlib.util.find_spec("mlx_whisper") is not None,
             "vlm_installed": importlib.util.find_spec("mlx_vlm") is not None,
             "session_present": (root / "auth/instagram.json").is_file(),
-            "auth_wait": bool(store.value("instagram_auth_wait", False)),
+            "auth_wait": bool(waiting),
+            "auth_wait_channels": waiting,
             "next_run": store.value("instagram_next_run", 0),
         },
         "additional_service_budget": 0,
@@ -258,15 +270,17 @@ def import_video(ctx: typer.Context, url: str, channel: str = "default", mode: s
 
 
 @app.command("instagram-login")
-def instagram_login(ctx: typer.Context, username: str):
+def instagram_login(ctx: typer.Context, username: str,
+                    session_file: Annotated[Path | None, typer.Option("--session-file")] = None):
     """로컬에서 Instagram에 로그인합니다. 비밀번호와 2FA 입력은 숨겨집니다."""
     from .instagram import InstagramError, login_instagram
 
     if importlib.util.find_spec("instaloader") is None:
         raise typer.BadParameter("uv sync --extra mlx --extra images --extra instagram으로 설치하세요.")
+    prompt = None if session_file else lambda message: typer.prompt(message, hide_input=True)
     try:
-        name = login_instagram(Store(ctx.obj), username,
-                               prompt_secret=lambda message: typer.prompt(message, hide_input=True))
+        name = login_instagram(Store(ctx.obj), username, prompt_secret=prompt,
+                               session_file=session_file)
     except (InstagramError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from None
     typer.echo(f"[공유 수집 계정] @{name} 연결 완료 · 인증 대기 작업을 복원했습니다.")
@@ -427,6 +441,30 @@ def work(ctx: typer.Context):
         raise typer.Exit(1)
 
 
+@app.command()
+def cleanup(ctx: typer.Context, days: int = 14,
+            apply: Annotated[bool, typer.Option("--apply")] = False):
+    """완료된 작업의 중간 산출물을 정리합니다. 기본은 미리보기입니다."""
+    if days < 0:
+        raise typer.BadParameter("days는 0 이상이어야 합니다.")
+    paths = plan_cleanup(Store(ctx.obj), days=days)
+    if not paths:
+        typer.echo("정리할 산출물이 없습니다.")
+        return
+    for path in paths:
+        typer.echo(str(path))
+    if not apply:
+        typer.echo(f"{len(paths)}개 항목. 실제 삭제는 --apply")
+        return
+    failures: list[tuple[Path, str]] = []
+    removed = apply_cleanup(paths, failures=failures)
+    typer.echo(f"{removed}개 항목 삭제 완료")
+    for path, reason in failures:
+        typer.echo(f"삭제 실패: {path} · {reason}", err=True)
+    if failures:
+        raise typer.Exit(1)
+
+
 @app.command("serve")
 def daemon(ctx: typer.Context):
     """예약·제작·텔레그램을 계속 실행합니다. 현재 작업 완료 후 Ctrl+C로 종료."""
@@ -438,6 +476,12 @@ def daemon(ctx: typer.Context):
         raise typer.Exit(1) from None
 
 
+def _when(value: float | None, timezone: str) -> str:
+    if not value:
+        return "-"
+    return datetime.fromtimestamp(value, ZoneInfo(timezone)).strftime("%m-%d %H:%M")
+
+
 @app.command()
 def status(ctx: typer.Context, channel: str | None = None,
            all_channels: Annotated[bool, typer.Option("--all")] = False):
@@ -447,12 +491,21 @@ def status(ctx: typer.Context, channel: str | None = None,
     profile = profile_for(store, selected) if selected is not None else None
     paused = store.value("paused", False) or (profile is not None and profile.paused)
     typer.echo(f"{profile.label if profile else '[전체]'} {'일시정지' if paused else '실행 가능'}")
+    typer.echo(f"서비스: {heartbeat_label(heartbeat_age(ctx.obj))} · "
+               f"미전송 알림: {store.notification_count()}건 · "
+               f"알림 파일: {alerts_count(ctx.obj)}건")
     for p in [profile] if profile else store.profiles():
         materials = NewsStore(store) if p.settings.production_type == "news" else InstagramStore(store)
         state = materials.channel_state(p.id)
         typer.echo(f"{p.label} {p.settings.production_label} · 소재: {state['available']} · "
                    f"{'소재 대기' if not state['available'] else '소재 준비'} · auth_wait: {state['auth_wait']} · "
                    f"다음 수집: {state['next_run']}")
+        if p.settings.production_type == "instagram":
+            for source in InstagramStore(store).sources(p.id):
+                typer.echo(f"  @{source['username']} · {source['status']} · "
+                           f"마지막 성공: {_when(source['last_success'], p.settings.timezone)} · "
+                           f"연속 실패: {source['failure_count']} · "
+                           f"다음: {_when(source['next_run'], p.settings.timezone)}")
     for job in store.list(channel_id=selected):
         typer.echo(f"[{job['channel_id']}] {job['id']} {Settings.model_validate(job['settings']).production_label} "
                    f"{job['status']:10} {job['stage']:8} {job['title'] or ''}")

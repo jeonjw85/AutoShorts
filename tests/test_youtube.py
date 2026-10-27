@@ -16,10 +16,15 @@ def target():
     return UploadTarget(channel_id="default", youtube_id=A)
 
 
-def transport(server, identity=A):
+def transport(server, identity=A, verification=None):
     def route(request):
         if request.url.path == "/youtube/v3/channels":
             return httpx.Response(200, json={"items": [{"id": identity, "snippet": {"title": "test"}}]})
+        if request.url.path == "/youtube/v3/videos":
+            if verification:
+                return verification(request)
+            return httpx.Response(200, json={"items": [{"status": {"uploadStatus": "uploaded",
+                                                                   "privacyStatus": "public"}}]})
         return server(request)
     return httpx.MockTransport(route)
 
@@ -208,3 +213,79 @@ def test_legacy_session_is_enriched_before_resuming(tmp_path, story_data):
         assert uploader.upload(video, Story(**story_data), Settings(), tmp_path,
                                target=target(), legacy=True) == "video123456"
     assert transfers == ["PUT"]
+
+
+def test_verify_upload_polls_three_times_and_records_status():
+    from shorts_local.youtube import YouTubeUploader
+
+    calls, sleeps = [], []
+
+    def server(request):
+        calls.append(request)
+        if len(calls) < 3:
+            return httpx.Response(200, json={"items": []})
+        return httpx.Response(200, json={"items": [{"status": {"uploadStatus": "uploaded",
+                                                               "privacyStatus": "unlisted"}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(server)) as client:
+        result = YouTubeUploader(lambda: "t", client, sleep=sleeps.append).verify_upload("video123456")
+    assert len(calls) == 3 and sleeps == [2, 2]
+    assert calls[0].url.params["part"] == "status,processingDetails"
+    assert calls[0].url.params["id"] == "video123456"
+    assert result["upload_status"] == "uploaded" and result["privacy_status"] == "unlisted"
+    assert result["verified_at"] > 0
+
+
+def test_verify_upload_survives_http_errors_without_blocking_the_upload():
+    from shorts_local.youtube import YouTubeUploader
+
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500))) as client:
+        result = YouTubeUploader(lambda: "t", client, sleep=lambda _: None).verify_upload("video123456")
+    assert result["upload_status"] is None and result["verified_at"] > 0
+
+
+def test_rejected_upload_status_blocks_every_retry(tmp_path, story_data):
+    from shorts_local.process import BlockedError
+    from shorts_local.youtube import YouTubeUploader
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"x" * 1000)
+
+    def server(request):
+        if request.method == "POST":
+            return httpx.Response(200, headers={"Location": SESSION})
+        return httpx.Response(200, json={"id": "video123456"})
+
+    def verification(_):
+        return httpx.Response(200, json={"items": [{"status": {"uploadStatus": "rejected"}}]})
+
+    with httpx.Client(transport=transport(server, verification=verification)) as client:
+        uploader = YouTubeUploader(lambda: "t", client, sleep=lambda _: None)
+        with pytest.raises(BlockedError):
+            uploader.upload(video, Story(**story_data), Settings(), tmp_path, target=target())
+    receipt = json.loads((tmp_path / "upload-receipt.json").read_text())
+    assert receipt["upload_status"] == "rejected" and receipt["video_id"] == "video123456"
+    with httpx.Client(transport=transport(server, verification=verification)) as client:
+        with pytest.raises(BlockedError):
+            YouTubeUploader(lambda: "t", client, sleep=lambda _: None).upload(
+                video, Story(**story_data), Settings(), tmp_path, target=target())
+
+
+def test_upload_receipt_records_verification_fields(tmp_path, story_data):
+    from shorts_local.youtube import YouTubeUploader
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"x" * 1000)
+
+    def server(request):
+        if request.method == "POST":
+            return httpx.Response(200, headers={"Location": SESSION})
+        return httpx.Response(200, json={"id": "video123456"})
+
+    with httpx.Client(transport=transport(server)) as client:
+        YouTubeUploader(lambda: "t", client).upload(
+            video, Story(**story_data), Settings(), tmp_path, target=target())
+    receipt = json.loads((tmp_path / "upload-receipt.json").read_text())
+    assert receipt["upload_status"] == "uploaded"
+    assert receipt["privacy_status"] == "public"
+    assert receipt["verified_at"] > 0

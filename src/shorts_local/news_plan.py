@@ -19,6 +19,10 @@ from .planning import generate_draft, parse_json
 from .process import BlockedError
 
 
+class NewsPlanError(BlockedError):
+    pass
+
+
 class NewsCard(ValueModel):
     lines: list[Annotated[str, Field(min_length=1, max_length=18)]] = Field(min_length=2, max_length=2)
     narration: str = Field(min_length=10, max_length=180)
@@ -141,4 +145,4 @@ def plan_news(settings: Settings, article: ArticleDocument, workdir: Path, *, pr
         write_artifact(path, key, {"plan": plan.model_dump(), "verdict": verdict.model_dump(),
                                    "plan_key": artifact_key("plan", plan.model_dump())})
         return plan
-    raise BlockedError("한 번 재기획한 뉴스 대본도 본문 검증을 통과하지 못했습니다.")
+    raise NewsPlanError("한 번 재기획한 뉴스 대본도 본문 검증을 통과하지 못했습니다.")

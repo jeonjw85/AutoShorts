@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 
 from .config import Settings
+from .health import heartbeat_age, heartbeat_label
 from .instagram_models import parse_instagram_url
 from .instagram_store import InstagramStore
 from .news_store import NewsStore
@@ -61,11 +62,12 @@ def handle_update(store: Store, update: dict, owner_id: int) -> dict | None:
         return None
     command = text.partition(" ")[0].split("@")[0].lower()
     prepared = _release_notice() if command == "/update" else None
+    service = heartbeat_label(heartbeat_age(store.root)) if command in {"/status", "/queue"} else None
     with store.transaction():
         reply = store.telegram_reply(update["update_id"])
         if reply is None:
             reply = {"text": f"[전체]\n{prepared}"} if prepared is not None else _handle_command(
-                store, update, text)
+                store, update, text, service=service)
             store.accept_telegram(update["update_id"], reply)
         return reply
 
@@ -84,7 +86,7 @@ def _release_notice() -> str:
     return notice
 
 
-def _handle_command(store: Store, update: dict, text: str) -> dict:
+def _handle_command(store: Store, update: dict, text: str, *, service: str | None = None) -> dict:
     try:
         _, url = parse_instagram_url(text)
     except ValueError:
@@ -192,7 +194,9 @@ def _handle_command(store: Store, update: dict, text: str) -> dict:
             from .updates import installed_version
 
             lines = [f"버전: {installed_version()}", "일시정지" if paused else "실행 가능",
-                     f"기획: {settings.planner} · 화면: {settings.visuals} · 추가 서비스 요금 0원"]
+                     f"기획: {settings.planner} · 화면: {settings.visuals} · 추가 서비스 요금 0원",
+                     f"서비스: {service or heartbeat_label(heartbeat_age(store.root))} · "
+                     f"미전송 알림: {store.notification_count()}건"]
             for channel in store.profiles() if selected is None else [p]:
                 materials = news if channel.settings.production_type == "news" else instagram
                 state = materials.channel_state(channel.id)

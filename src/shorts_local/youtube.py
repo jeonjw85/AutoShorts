@@ -3,10 +3,13 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -19,6 +22,8 @@ from .store import Store
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload",
           "https://www.googleapis.com/auth/youtube.readonly"]
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
+VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+TOKEN_WARN_AFTER = 6 * 86400
 
 
 def file_hash(path: Path) -> str:
@@ -100,9 +105,35 @@ def login(store: Store, channel_id: str, client_file: Path) -> YouTubeChannel:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.parent.chmod(0o700)
         atomic_json(path, {"youtube_channel_id": identity.id,
-                           "credentials": json.loads(credentials.to_json())})
+                           "credentials": json.loads(credentials.to_json()),
+                           "granted_at": time.time()})
         store.update_profile_settings(channel_id, {"youtube_enabled": True})
     return identity
+
+
+def warn_expiring_tokens(store: Store, *, now: float | None = None) -> int:
+    now = time.time() if now is None else now
+    warned = 0
+    for profile in store.profiles():
+        if not profile.youtube_channel_id or not profile.settings.youtube_enabled:
+            continue
+        try:
+            granted = read_auth(auth_path(store.root, profile.id)).get("granted_at")
+        except BlockedError:
+            continue
+        if not isinstance(granted, (int, float)) or isinstance(granted, bool):
+            continue
+        if now - granted < TOKEN_WARN_AFTER:
+            continue
+        date = datetime.fromtimestamp(now, ZoneInfo(profile.settings.timezone)).date().isoformat()
+        key = f"youtube_token_warned:{profile.id}:{date}"
+        if store.value(key, False):
+            continue
+        store.notify(f"{profile.label}\nYouTube 인증이 6일을 넘겼습니다. "
+                     "OAuth 동의 화면을 In production으로 게시하거나 다시 로그인하세요.")
+        store.set_value(key, True)
+        warned += 1
+    return warned
 
 
 def _token_provider(path: Path, lock: Path, expected: str | None, *, legacy: bool = False):
@@ -171,6 +202,8 @@ def completed_upload(video: Path, workdir: Path, *, target: UploadTarget | None,
         return None
     receipt = read_upload_artifact(path)
     check_artifact_target(receipt, target, legacy)
+    if receipt.get("upload_status") in {"rejected", "failed"}:
+        raise BlockedError("YouTube가 업로드를 거부한 작업입니다. Studio에서 사유를 확인하세요.")
     if receipt.get("sha256") != file_hash(video):
         raise BlockedError("이미 업로드된 작업의 영상 파일이 변경되었습니다.")
     video_id = receipt.get("video_id")
@@ -180,11 +213,33 @@ def completed_upload(video: Path, workdir: Path, *, target: UploadTarget | None,
 
 
 class YouTubeUploader:
-    def __init__(self, token, client: httpx.Client | None = None, chunk_size: int = 8 * 1024**2):
+    def __init__(self, token, client: httpx.Client | None = None, chunk_size: int = 8 * 1024**2,
+                 sleep=time.sleep):
         self.token = token
         self.client = client or httpx.Client(timeout=120, follow_redirects=False)
         self.owns_client = client is None
         self.chunk_size = chunk_size
+        self.sleep = sleep
+
+    def verify_upload(self, video_id: str) -> dict:
+        result = {"upload_status": None, "privacy_status": None, "verified_at": time.time()}
+        for attempt in range(3):
+            if attempt:
+                self.sleep(2)
+            try:
+                response = self.request("GET", VIDEOS_URL,
+                                        params={"part": "status,processingDetails", "id": video_id})
+                status = response.json()["items"][0]["status"]
+                if not isinstance(status, dict):
+                    continue
+            except (RuntimeError, ValueError, KeyError, IndexError, TypeError):
+                continue
+            result.update(upload_status=status.get("uploadStatus"),
+                          privacy_status=status.get("privacyStatus"),
+                          verified_at=time.time())
+            if result["upload_status"] in {"uploaded", "processed", "rejected", "failed"}:
+                break
+        return result
 
     def __enter__(self):
         return self
@@ -239,7 +294,12 @@ class YouTubeUploader:
                 raise BlockedError("업로드 완료 여부가 불확실합니다. YouTube Studio에서 확인하세요.") from None
             if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
                 raise BlockedError("YouTube 응답에 올바른 영상 ID가 없습니다.")
-            atomic_json(receipt_file, {"video_id": video_id, "sha256": digest, **target.artifact_fields()})
+            receipt = {"video_id": video_id, "sha256": digest, **target.artifact_fields()}
+            atomic_json(receipt_file, receipt)
+            verified = self.verify_upload(video_id)
+            atomic_json(receipt_file, {**receipt, **verified})
+            if verified["upload_status"] in {"rejected", "failed"}:
+                raise BlockedError("YouTube가 업로드를 거부했습니다. Studio에서 사유를 확인하세요.")
             return video_id
 
         def offset_from(response):

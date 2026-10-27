@@ -1,6 +1,7 @@
 """Channel-scoped source and material operations sharing the command transaction."""
 
 import json
+import random
 import re
 import time
 import uuid
@@ -195,21 +196,26 @@ class InstagramStore:
                        (max(now, self.store.value("instagram_next_run", 0)), channel_id))
 
     def due_source(self, *, channel_id: str | None = None, now: float | None = None) -> dict | None:
+        from .instagram import auth_wait_channels
+
         now = time.time() if now is None else now
         if channel_id is not None:
             self.store.profile(channel_id)
-        if (self.store.value("paused", False) or self.store.value("instagram_auth_wait", False)
-                or self.store.value("instagram_next_run", 0) > now):
+        if self.store.value("paused", False) or self.store.value("instagram_next_run", 0) > now:
             return None
+        waiting = sorted(auth_wait_channels(self.store))
+        clause = f" AND s.channel_id NOT IN ({','.join('?' for _ in waiting)})" if waiting else ""
         with self.store.db() as db:
-            row = db.execute("""SELECT s.id FROM instagram_sources s JOIN channels c ON c.id=s.channel_id
+            row = db.execute(f"""SELECT s.id FROM instagram_sources s JOIN channels c ON c.id=s.channel_id
                 WHERE s.active=1 AND c.paused=0 AND s.status NOT IN ('unavailable','duplicate')
-                AND s.next_run<=? AND (? IS NULL OR s.channel_id=?)
+                AND s.next_run<=? AND (? IS NULL OR s.channel_id=?){clause}
                 ORDER BY s.next_run,s.registered_at,s.id LIMIT 1""",
-                (now, channel_id, channel_id)).fetchone()
+                (now, channel_id, channel_id, *waiting)).fetchone()
         return self.source(row[0]) if row else None
 
     def channel_state(self, channel_id: str) -> dict:
+        from .instagram import auth_wait_channels
+
         sources = self.sources(channel_id)
         with self.store.db() as db:
             available = db.execute("""SELECT count(*) FROM instagram_items i
@@ -219,7 +225,7 @@ class InstagramStore:
                                   (channel_id,)).fetchone()[0]
         upcoming = [s["next_run"] for s in sources if s["active"]]
         return {"available": available, "reserved": reserved, "sources": len(sources),
-                "auth_wait": bool(self.store.value("instagram_auth_wait", False)),
+                "auth_wait": channel_id in auth_wait_channels(self.store),
                 "next_run": max(min(upcoming), self.store.value("instagram_next_run", 0)) if upcoming else None}
 
     def _notice(self, channel_id, code, *, source_id=None, job_id=None):
@@ -247,16 +253,22 @@ class InstagramStore:
             self.store.notify(text, job_id)
         self.store.set_value("instagram_alerts", alerts)
 
-    def _wait_state(self, code, retry_at, now, auth_generation):
+    def _wait_state(self, code, retry_at, now, auth_generation, channel_id=None):
         from .instagram import session_generation
 
         if (code == "auth_wait" and auth_generation is not None
                 and auth_generation != session_generation(self.store.root)):
             code, retry_at = "deferred", now + 1
         if code == "auth_wait":
-            self.store.set_value("instagram_auth_wait", True)
+            channels = self.store.value("instagram_auth_wait_channels", [])
+            channels = ([value for value in channels if isinstance(value, str)]
+                        if isinstance(channels, list) else [])
+            if channel_id and channel_id not in channels:
+                channels.append(channel_id)
+            self.store.set_value("instagram_auth_wait_channels", channels)
         if code in {"rate_limit", "deferred"}:
-            retry_at = retry_at if retry_at is not None else now + (3600 if code == "rate_limit" else 5)
+            default = 3600 * random.uniform(0.8, 1.2) if code == "rate_limit" else 5
+            retry_at = retry_at if retry_at is not None else now + default
             retry_at = max(retry_at, self.store.value("instagram_next_run", 0))
             self.store.set_value("instagram_next_run", retry_at)
         return code, retry_at
@@ -268,9 +280,11 @@ class InstagramStore:
         now = time.time() if now is None else now
         with self.store.transaction(), self.store.db() as db:
             source = self.source(source_id)
-            code, retry_at = self._wait_state(code, retry_at, now, auth_generation)
+            code, retry_at = self._wait_state(code, retry_at, now, auth_generation,
+                                              source["channel_id"])
             count = source["failure_count"] + (code == "transient")
-            delay = min(21600, 300 * 2 ** min(max(0, count - 1), 10)) if code == "transient" else 5
+            delay = (min(21600, 300 * 2 ** min(max(0, count - 1), 10)) * random.uniform(0.9, 1.1)
+                     if code == "transient" else 5)
             status = code if code in {"auth_wait", "unavailable"} else "retry"
             db.execute("""UPDATE instagram_sources SET status=?,error=?,failure_count=?,next_run=?
                 WHERE id=?""", (status, MESSAGES.get(code, MESSAGES["transient"]), count,
@@ -288,7 +302,8 @@ class InstagramStore:
             job = self.store.get(job_id)
             if job["status"] != "running":
                 return
-            code, retry_at = self._wait_state(code, retry_at, now, auth_generation)
+            code, retry_at = self._wait_state(code, retry_at, now, auth_generation,
+                                              job["channel_id"])
             self.store.update(job_id, status="auth_wait" if code == "auth_wait" else "retry",
                               attempts=max(0, job["attempts"] - 1), error=MESSAGES[code],
                               next_run=max(now + 1, retry_at or now + 5))
@@ -308,6 +323,7 @@ class InstagramStore:
             db.execute("""UPDATE instagram_sources SET status='pending',next_run=0,error=NULL
                 WHERE status='auth_wait'""")
             self.store.set_value("instagram_auth_wait", False)
+            self.store.set_value("instagram_auth_wait_channels", [])
             alerts = self.store.value("instagram_alerts", {})
             self.store.set_value("instagram_alerts", {k: v for k, v in alerts.items() if v != "auth_wait"})
             self.store.set_value("instagram_auth_generation", generation)

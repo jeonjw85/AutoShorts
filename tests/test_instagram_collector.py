@@ -46,7 +46,9 @@ def test_checkpoint_survives_parent_death_before_apply(tmp_path, monkeypatch):
 
 def test_partial_scan_failure_preserves_watermark(tmp_path, monkeypatch):
     import shorts_local.collector as collector
+    import shorts_local.instagram_store as target
 
+    monkeypatch.setattr(target.random, "uniform", lambda low, high: 1.0)
     ig = InstagramStore(Store(tmp_path))
     source = ig.add_source("pets", now=100)
 
@@ -174,7 +176,10 @@ def test_collector_and_fetch_share_lock_without_spending_attempts(tmp_path):
     assert s.claim()["id"] == next_job
 
 
-def test_backoff_and_recovery_notifications(tmp_path):
+def test_backoff_and_recovery_notifications(tmp_path, monkeypatch):
+    import shorts_local.instagram_store as target
+
+    monkeypatch.setattr(target.random, "uniform", lambda low, high: 1.0)
     s = Store(tmp_path)
     ig = InstagramStore(s)
     source = ig.add_source("pets", now=100)

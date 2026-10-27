@@ -4,6 +4,7 @@ import json
 import shutil
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 from .artifacts import artifact_key
@@ -13,6 +14,7 @@ from .instagram import InstagramError
 from .instagram_store import InstagramStore
 from .models import Story, VideoMetadata
 from .news_fetch import UnsupportedArticle
+from .news_plan import NewsPlanError
 from .planning import plan_story
 from .process import BlockedError, QuotaError, atomic_json, exclusive_lock, run_process
 from .profiles import UploadTarget
@@ -40,13 +42,29 @@ def engine(stage: str, workdir: Path, settings: Settings):
                  workdir / f"{stage}.log", settings.stage_timeout)
 
 
+def warn_privacy_mismatch(store: Store, job: dict, folder: Path, settings: Settings) -> None:
+    path = folder / "upload-receipt.json"
+    try:
+        receipt = read_upload_artifact(path)
+    except BlockedError:
+        return
+    actual = receipt.get("privacy_status")
+    if not isinstance(actual, str) or actual == settings.privacy or receipt.get("privacy_warning_sent"):
+        return
+    store.notify(f"업로드는 완료됐지만 공개 범위가 요청과 다릅니다.\n"
+                 f"요청: {settings.privacy} · 실제: {actual}\n작업: {job['id']}", job["id"])
+    atomic_json(path, {**receipt, "privacy_warning_sent": True})
+
+
 def publish_video(store: Store, job: dict, video: Path, metadata: VideoMetadata, folder: Path) -> str:
     channel_id = job["channel_id"]
+    settings = Settings.model_validate(job["settings"])
     target = (UploadTarget(channel_id=channel_id, youtube_id=job["target_youtube_id"])
               if job["target_youtube_id"] else None)
     legacy = bool(job["legacy_upload"]) and channel_id == "default"
     receipt = completed_upload(video, folder, target=target, legacy=legacy)
     if receipt:
+        warn_privacy_mismatch(store, job, folder, settings)
         return receipt
     profile = store.profile(channel_id)
     auth = read_auth(auth_path(store.root, channel_id))
@@ -73,8 +91,10 @@ def publish_video(store: Store, job: dict, video: Path, metadata: VideoMetadata,
     youtube_id = store.bind_job_target(job["id"], identity.id)
     target = UploadTarget(channel_id=channel_id, youtube_id=youtube_id)
     with YouTubeUploader(token) as uploader:
-        return uploader.upload(video, metadata, Settings.model_validate(job["settings"]), folder,
-                               target=target, legacy=legacy_state)
+        video_id = uploader.upload(video, metadata, settings, folder,
+                                   target=target, legacy=legacy_state)
+    warn_privacy_mismatch(store, job, folder, settings)
+    return video_id
 
 
 def _story_key(job: dict) -> str:
@@ -199,6 +219,25 @@ def execute_job(store: Store, job: dict):
         store.notify(f"영상 완성 · {metadata.title}\n작업: {job['id']}\n/preview {job['id']}", job["id"])
 
 
+def handle_news_plan_failure(store: Store, job: dict, exc: Exception, *,
+                             now: float | None = None) -> str | None:
+    from .news_store import NewsStore
+
+    news = NewsStore(store)
+    with store.transaction():
+        news.reject_item(job["input"]["item_id"], "기획 검증 실패")
+        store.update(job["id"], status="blocked", error=str(exc)[:500])
+    key = job.get("dedup_key") or ""
+    replacement = (news.replace_failed(job["channel_id"], schedule_key=key,
+                                       now=time.time() if now is None else now)
+                   if key.startswith("schedule:") else None)
+    text = f"기획 검증 실패 · {job['id']}\n{exc}"
+    if replacement:
+        text += f"\n다음 기사로 대체: {replacement}"
+    store.notify(text, job["id"])
+    return replacement
+
+
 def run_next(root: Path) -> str | None:
     store = Store(root)
     with exclusive_lock(root / "worker.lock"):
@@ -231,6 +270,8 @@ def run_next(root: Path) -> str | None:
                 NewsStore(store).reject_item(job["input"]["item_id"], str(exc))
                 store.update(job["id"], status="blocked", error=str(exc))
                 store.notify(f"기사 확인 필요 · {job['id']}\n{exc}", job["id"])
+        except NewsPlanError as exc:
+            handle_news_plan_failure(store, job, exc)
         except BlockedError as exc:
             store.update(job["id"], status="blocked", error=str(exc)[:500])
             store.notify(f"설정/복구 필요 · {job['id']}\n{exc}", job["id"])

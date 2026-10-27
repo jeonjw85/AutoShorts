@@ -24,6 +24,7 @@ class Settings(BaseModel):
     news_style: str = Field(default="사실만 짧고 크게 전달하고 숫자와 단위는 붙인다",
                             min_length=1, max_length=500)
     news_poll_minutes: int = Field(default=60, ge=15, le=1440)
+    news_max_age_hours: int = Field(default=48, ge=0, le=720)
     instagram_edit_mode: Literal["narrated", "original"] = "narrated"
     instagram_style: str = Field(default="차분하고 자연스러운 한국어로 핵심을 짧게 전달",
                                  min_length=1, max_length=500)

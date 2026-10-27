@@ -188,3 +188,81 @@ def test_damaged_credentials_require_matching_established_identity(tmp_path, mon
     assert path.read_bytes() == b"damaged credential bytes"
     assert s.profile().youtube_channel_id == known
     assert not list(path.parent.glob("youtube.damaged-*.json"))
+
+
+def test_privacy_mismatch_warns_once(tmp_path):
+    from shorts_local.config import Settings
+    from shorts_local.pipeline import warn_privacy_mismatch
+    from shorts_local.process import atomic_json
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    job = store.get(store.enqueue(Settings(privacy="public")))
+    folder = tmp_path / "jobs" / job["id"]
+    folder.mkdir(parents=True)
+    atomic_json(folder / "upload-receipt.json",
+                {"video_id": "video123456", "privacy_status": "private"})
+    warn_privacy_mismatch(store, job, folder, Settings(privacy="public"))
+    warn_privacy_mismatch(store, job, folder, Settings(privacy="public"))
+    assert store.notification_count() == 1
+    assert "private" in store.notifications()[0]["text"]
+    assert json.loads((folder / "upload-receipt.json").read_text())["privacy_warning_sent"] is True
+
+
+def test_login_records_granted_at(tmp_path, monkeypatch):
+    import shorts_local.youtube as yt
+
+    install_oauth(monkeypatch)
+    s = Store(tmp_path)
+    monkeypatch.setattr(yt, "identify_channel", lambda *_: yt.YouTubeChannel(A, "동물 채널"))
+    yt.login(s, "default", tmp_path / "client.json")
+    granted = json.loads((tmp_path / "channels/default/auth/youtube.json").read_text())["granted_at"]
+    assert isinstance(granted, float) and granted > 0
+
+
+def test_token_warning_after_six_days_is_sent_once_per_day(tmp_path):
+    from shorts_local.process import atomic_json
+    from shorts_local.youtube import auth_path, warn_expiring_tokens
+
+    store = Store(tmp_path)
+    store.bind_channel("default", A, "동물")
+    store.update_profile_settings("default", {"youtube_enabled": True})
+    now = 1000.0 + 7 * 86400
+    atomic_json(auth_path(tmp_path, "default"),
+                {"youtube_channel_id": A, "credentials": {"token": "t"},
+                 "granted_at": now - 7 * 86400})
+    assert warn_expiring_tokens(store, now=now) == 1
+    assert warn_expiring_tokens(store, now=now) == 0
+    assert "6일" in store.notifications()[0]["text"]
+    assert warn_expiring_tokens(store, now=now + 86400) == 1
+
+
+def test_token_warning_skips_fresh_or_untracked_auth(tmp_path):
+    from shorts_local.process import atomic_json
+    from shorts_local.youtube import auth_path, warn_expiring_tokens
+
+    store = Store(tmp_path)
+    store.bind_channel("default", A, "동물")
+    store.update_profile_settings("default", {"youtube_enabled": True})
+    now = 1000.0 + 7 * 86400
+    atomic_json(auth_path(tmp_path, "default"),
+                {"youtube_channel_id": A, "credentials": {"token": "t"},
+                 "granted_at": now - 5 * 86400})
+    assert warn_expiring_tokens(store, now=now) == 0
+    atomic_json(auth_path(tmp_path, "default"),
+                {"youtube_channel_id": A, "credentials": {"token": "t"}})
+    assert warn_expiring_tokens(store, now=now) == 0
+    assert store.notification_count() == 0
+
+
+def test_verify_upload_ignores_a_malformed_status_payload():
+    import httpx
+
+    from shorts_local.youtube import YouTubeUploader
+
+    responses = [{"items": [{"status": ["broken"]}]},
+                 {"items": [{"status": {"uploadStatus": "uploaded", "privacyStatus": "public"}}]}]
+    with httpx.Client(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json=responses.pop(0)))) as client:
+        result = YouTubeUploader(lambda: "t", client, sleep=lambda _: None).verify_upload("video123456")
+    assert result["upload_status"] == "uploaded"

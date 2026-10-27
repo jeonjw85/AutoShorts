@@ -34,9 +34,13 @@ Run `.venv/bin/shorts-local` from the project folder to use the optional depende
 .venv/bin/shorts-local resume
 .venv/bin/shorts-local retry JOB_ID
 .venv/bin/shorts-local work
+.venv/bin/shorts-local cleanup
+.venv/bin/shorts-local cleanup --days 30 --apply
 .venv/bin/shorts-local --version
 .venv/bin/shorts-local update
 ```
+
+`cleanup` lists transient job artifacts (narration clips, generated images, segments, stage logs) for finished jobs older than `--days` (default 14). It keeps `video.mp4`, `story.json`, `timeline.json`, `validation.json`, captions, and covers, and skips any job that still has an upload session. Nothing is deleted without `--apply`.
 
 `update` checks the latest GitHub release. It fetches the release tag and runs `uv sync` with the currently installed extras only when this repository's checkout is clean and `serve` is stopped. If there are local changes or a running service, it stops and reports the reason. Telegram's `/update` only checks for updates.
 
@@ -70,8 +74,12 @@ Deleting the database or the entire job folder also removes the records used to 
 ## Authentication
 
 - YouTube: Reconnect the profile with `youtube-login /path/to/client_secret.json --channel animals`. Upload and read permissions are used to verify the actual channel ID, and reauthentication is allowed only for the same target.
+- YouTube uploads are checked with `videos.list` (`part=status,processingDetails`) up to three times, two seconds apart, right after the resumable upload finishes. `upload-receipt.json` records `upload_status`, `privacy_status`, and `verified_at`. A `rejected` or `failed` upload status stops the job as `blocked` on every retry. When YouTube reports a different `privacyStatus` than requested, the upload is kept and one warning is sent.
+- Publish the OAuth consent screen (`In production`). In `Testing`, refresh tokens expire after seven days; the app warns once a day from day six when the auth file has `granted_at`, but it cannot renew an expired token without a new login. Reconnecting resets `granted_at`.
+- Since October 2026, unverified apps can upload `public` videos without review, so the consent screen does not need Google verification for this use (Google Issue Tracker 572863050).
 - Temporary authentication server or network errors are retried automatically. Revoked or expired refresh credentials require you to reconnect.
 - If a connected channel's authentication JSON is damaged, signing in again to the same YouTube channel recovers it. The damaged original is saved as `youtube.damaged-*.json` in the same authentication folder with 0600 permissions. Credentials are not automatically replaced for an unconnected profile whose previous channel ID cannot be verified, or for a different target channel.
+- Instagram: `instagram-login USERNAME` prompts for the password and a 2FA code when needed. `instagram-login USERNAME --session-file PATH` imports a saved Instaloader session (`sessionid`, `csrftoken`, `ds_user_id`) without prompting. The file is checked against the account before it is saved, and a malformed or rejected file ends with an error instead of falling back to a password prompt. Reconnecting clears the authentication wait for every channel; a wait recorded for one channel does not stop another channel from collecting.
 - Telegram: After replacing the token, run `telegram-setup` and restart the daemon.
 - Codex: `codex login status` for the CLI that actually runs must show a ChatGPT login. A wrapper on PATH without the actual CLI is not sufficient.
 - Do not share or commit `data/auth/`, `data/channels/*/auth/`, or `upload-state.json`. Credential files are saved with 0600 permissions.
@@ -94,7 +102,7 @@ Using multiple channels does not increase the Google project's shared quota. Whe
 - After an initial full scan, routine scans stop independently for posts and reels after 20 consecutive posts older than the last full scan's start (or source registration). One old or pinned post does not stop collection. A full rescan is due one day after the previous full scan finishes; deeply out-of-order or delayed entries may wait for that rescan. Recent scans do not advance the full-scan watermark.
 - When a scan resumes a saved tail, it first probes up to 20 fresh items from each feed within the same 200-item budget. This checks for new head posts without discarding historical progress, including when one feed has already been exhausted. Checkpoint metadata and the full-rescan completion time survive restarts.
 - `source scan` and Telegram's `/source_scan` respect global, channel, and source pauses, as well as shared server backoff. The Telegram command schedules collection and responds immediately.
-- `auth_wait` does not use a retry attempt. Reconnecting with `instagram-login USERNAME` automatically requeues affected jobs under the existing date and pause rules. A manual `retry` overrides date-based skipping but does not resolve the authentication problem itself.
+- `auth_wait` does not use a retry attempt. It is recorded per channel, so one broken source does not pause collection for the other channels that share the service. Reconnecting with `instagram-login USERNAME` automatically requeues affected jobs under the existing date and pause rules. A manual `retry` overrides date-based skipping but does not resolve the authentication problem itself.
 - If the database update is interrupted after a new session file is saved, the next service or worker run recovers it. Existing jobs retain the mode, style, and source values set when they were created, rather than taking the current channel settings.
 - On days without available source material, `status` and `materials` show that the app is waiting for material. Repeated alerts for the same problem are suppressed while it persists. Unsupported photo or carousel posts and inaccessible material are recorded with a reason and are not automatically selected again.
 - The job steps are `fetch`, `analyze`, `edit-plan`, `speech` (narrated videos only), `render`, and `upload`, in that order. Partial files are not reused as completed output. The final `validation.json` ties the inputs and settings to hashes of the video, metadata, and timeline. If completed output with an upload record changes, the job stops as `blocked` instead of rendering again.
@@ -117,13 +125,14 @@ Using multiple channels does not increase the Google project's shared quota. Whe
 
 - Replace the example URLs with real article or RSS URLs. Article links are registered immediately. RSS 2.0 and Atom feeds automatically save only items published after the feed was registered as source material. Each canonical article URL is associated with one job per channel. Failed or skipped material is not automatically made available again.
 - At the scheduled time, the app selects only the oldest unused article. If no material is available, it waits. `import-article` and an explicit `create --type news` do not change the channel defaults or the scheduling key for that day.
+- `news_max_age_hours` (default 48, 0 disables the limit, maximum 720) drops feed items older than the window when the feed is saved and when the next article is selected. `import-article` and an explicit `create --type news` are not filtered, because the user chose that article.
 - Manage feeds with `news-source list/pause/resume`. The default polling interval is 60 minutes, and `news_poll_minutes` accepts values from 15 to 1440 minutes. Each collection run is limited to 120 seconds and 200 items. Failures trigger a wait of five minutes to six hours. The same failure alert is sent only once until recovery.
 - Telegram supports `/article URL`, `/news_add FEED_URL`, `/news_sources`, `/news_pause ID`, `/news_resume ID`, `/news_scan`, and `/set type news`. `/news_scan` only schedules a check. DNS lookups and downloads run in a worker outside the command transaction, so `/pause` can still be processed during a slow feed request.
 - HTML is limited to 5 MiB and the featured image to 12 MiB. The article-fetching process has a 30-second limit. If image retrieval fails after text extraction succeeds, the app creates text cards from the saved article body. Private addresses and invalid redirects are rejected before connecting.
-- If the body has fewer than 400 characters, or neither the page nor RSS provides a publication date, the material remains `unsupported` and the job stays `blocked`. The page date takes precedence over the RSS date; today's date is never used as a substitute. Dynamic pages, paywalls, and publisher-specific HTML can prevent extraction.
+- If the body has fewer than 400 characters, or neither the page nor RSS provides a publication date, the material remains `unsupported` and the job stays `blocked`. The page date takes precedence over the RSS date; today's date is never used as a substitute. Dynamic pages, paywalls, and publisher-specific HTML can prevent extraction. JSON-LD (`application/ld+json`, including arrays and `@graph`) supplies a fallback body, date, headline, and image when the visible markup lacks them, but it never overrides Open Graph or article metadata.
 - Site-wide clocks, modification dates, and event dates in the article body are not treated as publication dates. If publication metadata or an article-header timestamp cannot be verified, the RSS date is used. Temporary DNS errors use the existing network retry policy of up to three attempts rather than rejecting the material.
 - RSS publication times are evaluated against the time the fetch completes. If any items are still dated in the future, ETag and Last-Modified values are not saved, allowing those items to be checked again on the next fetch. RSS downloads are also deferred when free disk space is below 5 GiB.
-- `news_style` provides tone guidance. After checking quotations and numbers against the article body, a separate local planning call cross-checks people, outcomes, and negations. If the script is rejected after one correction, the job becomes `blocked`. Running `retry` with the same inputs and settings does not grant unlimited validation attempts. Input validation does not establish whether the article itself is true or whether multiple sources agree.
+- `news_style` provides tone guidance. After checking quotations and numbers against the article body, a separate local planning call cross-checks people, outcomes, and negations. If the script is rejected after one correction, the item becomes `unsupported`, the job becomes `blocked`, and a scheduled job enqueues the next unused article as a replacement (at most three replacements per channel and date). Manual `/article` and `create` jobs are not replaced. Running `retry` with the same inputs and settings does not grant unlimited validation attempts. Input validation does not establish whether the article itself is true or whether multiple sources agree.
 - The job folder's `article.json` and `news-plan.json` are caches keyed by their inputs. If the body hash or settings change, the plan is validated again. Speech is reused by sentence, model, and voice. The final `validation.json` links the video, metadata, and timeline. When they match, publishing can recover without downloading the article again or running a model. If a file changes after its upload has started, the job is put on hold rather than rendered again.
 - Before migrating from schema 2 to schema 3, the app creates `backups/pre-news.sqlite3` with 0600 permissions. Existing story and Instagram job inputs, settings, files, YouTube targets, notifications, Telegram receive history, and earlier backups are preserved. Stop `serve` and `work`, then run `init` to migrate the operational database.
 - News-specific defaults are excluded from the input keys of existing Instagram completion records. Instagram videos completed or already uploading under an earlier version can also recover using their original files.
@@ -169,6 +178,14 @@ The regression run at that time passed all 218 tests. Ruff, lockfile checks, and
 - Speech quality depends on the model's Korean pronunciation. Use a sample video to check the voice and sentence length.
 - If a long script or repetitive TTS output exceeds the duration limit, the job fails before uploading.
 - Videos use static captions for each scene with background motion. Word-by-word caption highlighting, fully AI-generated video, and automatic background music selection are not currently supported.
+
+## Service liveness and alert fallback
+
+- While `serve` runs, it rewrites `data/heartbeat.json` every 15 seconds. `status` shows the last write and marks the service as stale after 5 minutes. A stale heartbeat means the process stopped or the Mac was asleep; scheduled jobs are not backfilled.
+- Stage logs rotate at 20 MiB and `data/service.log` rotates the same way at startup. Rotation uses copytruncate because the running service holds the file descriptor.
+- When Telegram is not configured, pending notifications are appended to `data/alerts.log` instead of being sent. **They are not retried later**; the file is the delivery. Read it on the next machine wake-up.
+- If Telegram is configured but a send keeps failing, an alert is retried five times, then written to `data/alerts.log`. Every alert line includes the timestamp and job ID when one exists.
+- `status` reports the queue depth, pending notifications, and per-source collection health. `doctor` reports blocking configuration such as channels waiting for Instagram login.
 
 ## When the bot does not respond
 

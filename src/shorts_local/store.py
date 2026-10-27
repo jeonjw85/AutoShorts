@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -11,12 +12,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import Settings
+from .health import MAX_NOTIFICATION_ATTEMPTS, append_alert
 from .instagram_models import InstagramInput
 from .migrations import ensure_database
 from .models import Story
 from .news_models import NewsInput
 from .process import BlockedError, atomic_json
 from .profiles import ChannelProfile, validate_channel_id, validate_youtube_id
+
+logger = logging.getLogger(__name__)
 
 
 class Store:
@@ -303,10 +307,42 @@ class Store:
                 "SELECT * FROM notifications WHERE next_run<=? ORDER BY id LIMIT 5",
                 (time.time(),))]
 
-    def notification_result(self, note_id: int, success: bool):
+    def notifications(self, limit: int = 100) -> list[dict]:
+        with self.db() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM notifications ORDER BY id LIMIT ?", (limit,))]
+
+    def notification_count(self) -> int:
+        with self.db() as db:
+            return db.execute("SELECT COUNT(*) FROM notifications").fetchone()[0]
+
+    def discard_notification(self, note_id: int) -> None:
+        with self.db() as db:
+            db.execute("DELETE FROM notifications WHERE id=?", (note_id,))
+
+    def queue_depth(self) -> int:
+        with self.db() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status IN ('queued','retry')").fetchone()[0]
+
+    def notification_result(self, note_id: int, success: bool) -> bool:
+        """Return True while the notification stays queued for another attempt."""
         with self.db() as db:
             if success:
                 db.execute("DELETE FROM notifications WHERE id=?", (note_id,))
-            else:
-                db.execute("""UPDATE notifications SET attempts=attempts+1, next_run=?
-                    WHERE id=?""", (time.time() + 300, note_id))
+                return False
+            row = db.execute("SELECT attempts, text, job_id FROM notifications WHERE id=?",
+                             (note_id,)).fetchone()
+            if row is None:
+                return False
+            attempts = row["attempts"] + 1
+            if attempts >= MAX_NOTIFICATION_ATTEMPTS:
+                try:
+                    append_alert(self.root, row["text"], job_id=row["job_id"])
+                except OSError:
+                    logger.error("알림 파일을 쓸 수 없어 알림을 폐기합니다: %s", row["text"][:200])
+                db.execute("DELETE FROM notifications WHERE id=?", (note_id,))
+                return False
+            db.execute("UPDATE notifications SET attempts=?, next_run=? WHERE id=?",
+                       (attempts, time.time() + 300, note_id))
+            return True

@@ -64,3 +64,12 @@ def test_accepted_plan_cache_is_bound_to_article_and_settings(tmp_path, monkeypa
     assert len(calls) == 2
     news_plan.plan_news(Settings(news_style="차분하게 전달"), article(), tmp_path)
     assert len(calls) == 4
+
+
+def test_plan_failure_uses_a_dedicated_exception(tmp_path, monkeypatch):
+    from shorts_local import news_plan
+    from shorts_local.news_plan import NewsPlanError
+
+    monkeypatch.setattr(news_plan, "generate_draft", lambda *a, **k: "{}")
+    with pytest.raises(NewsPlanError):
+        news_plan.plan_news(Settings(), article(), tmp_path)

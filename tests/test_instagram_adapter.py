@@ -338,7 +338,7 @@ def test_sdk_errors_are_classified_without_raw_text(tmp_path):
         classified = target.classify_error(error("signed-url=SECRET"))
         assert classified.code == code and "SECRET" not in str(classified)
         if code == "rate_limit":
-            assert classified.retry_at >= time.time() + 3599
+            assert classified.retry_at >= time.time() + 2879
 
 
 @pytest.mark.parametrize("duration", [0.99, 600.01])
@@ -428,9 +428,9 @@ def test_real_sdk_response_errors_preserve_shared_wait(tmp_path, monkeypatch, st
         assert error.code == code and "SECRET" not in str(error)
         ig.record_failure(source["id"], error.code, retry_at=error.retry_at)
         if code == "rate_limit":
-            assert store.value("instagram_next_run") >= time.time() + 3599
+            assert store.value("instagram_next_run") >= time.time() + 2879
         else:
-            assert store.value("instagram_auth_wait") is True
+            assert store.value("instagram_auth_wait_channels") == ["default"]
     finally:
         loader.close()
 

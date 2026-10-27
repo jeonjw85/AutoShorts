@@ -63,6 +63,7 @@ def test_cutoff_reservation_and_rollback(tmp_path):
     from shorts_local.news_store import NewsStore
 
     s = Store(tmp_path)
+    s.update_profile_settings("default", {"news_max_age_hours": 0})
     news = NewsStore(s)
     source = news.add_source("https://example.com/rss", now=100)
     assert news.add_source("https://example.com/rss?utm_source=x")["id"] == source["id"]
@@ -79,3 +80,106 @@ def test_cutoff_reservation_and_rollback(tmp_path):
     assert next(i for i in news.materials() if i["canonical_url"].endswith("/b"))["job_id"] is None
     with pytest.raises(ValueError):
         s.enqueue(Settings(production_type="news"))
+
+
+def test_feed_skips_articles_older_than_the_freshness_window(tmp_path):
+    from shorts_local.news_store import NewsStore
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.update_profile_settings("default", {"production_type": "news"})
+    news = NewsStore(store)
+    source = news.add_source("https://example.com/feed", now=0)
+    now = 100 * 3600
+    added = news.apply_feed(source["id"], [
+        {"url": "https://example.com/old", "published_at": now - 49 * 3600},
+        {"url": "https://example.com/new", "published_at": now - 47 * 3600},
+    ], now=now)
+    assert added == 1
+    assert [item["canonical_url"] for item in news.materials()] == ["https://example.com/new"]
+
+
+def test_queue_selection_respects_the_current_freshness_window(tmp_path):
+    from shorts_local.news_store import NewsStore
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.update_profile_settings("default", {"production_type": "news"})
+    news = NewsStore(store)
+    source = news.add_source("https://example.com/feed", now=0)
+    now = 100 * 3600
+    news.apply_feed(source["id"], [{"url": "https://example.com/a", "published_at": now - 2 * 3600}],
+                    now=now)
+    store.update_profile_settings("default", {"news_max_age_hours": 1})
+    assert news.enqueue_next() is None
+    assert news.channel_state("default")["available"] == 0
+
+
+def test_replace_failed_enqueues_at_most_three_replacements(tmp_path):
+    from shorts_local.news_store import NewsStore
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.update_profile_settings("default", {"production_type": "news"})
+    news = NewsStore(store)
+    source = news.add_source("https://example.com/feed", now=0)
+    news.apply_feed(source["id"], [
+        {"url": f"https://example.com/{index}", "published_at": 100 + index} for index in range(6)
+    ], now=1000)
+    first = news.enqueue_next(key="schedule:2026-10-27", now=1000)
+    news.reject_item(store.get(first)["input"]["item_id"], "기획 검증 실패")
+    replacements = [news.replace_failed("default", schedule_key="schedule:2026-10-27", now=1000)
+                    for _ in range(4)]
+    assert all(replacements[:3]) and replacements[3] is None
+    assert store.value("news_replace:default:2026-10-27") == 3
+    assert {store.get(job)["dedup_key"] for job in replacements[:3]} == {
+        "schedule:2026-10-27:r1", "schedule:2026-10-27:r2", "schedule:2026-10-27:r3"}
+
+
+def test_scheduled_failure_blocks_the_job_and_keeps_manual_jobs_isolated(tmp_path):
+    from shorts_local.news_plan import NewsPlanError
+    from shorts_local.news_store import NewsStore
+    from shorts_local.pipeline import handle_news_plan_failure
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.update_profile_settings("default", {"production_type": "news"})
+    news = NewsStore(store)
+    source = news.add_source("https://example.com/feed", now=0)
+    news.apply_feed(source["id"], [
+        {"url": f"https://example.com/{index}", "published_at": 100 + index} for index in range(3)
+    ], now=1000)
+    scheduled = news.enqueue_next(key="schedule:2026-10-27", now=1000)
+    manual = news.enqueue_next(key="telegram:1", now=1000)
+    replacement = handle_news_plan_failure(store, store.get(scheduled), NewsPlanError("검증 실패"),
+                                           now=1000)
+    assert store.get(scheduled)["status"] == "blocked"
+    assert store.get(replacement)["dedup_key"] == "schedule:2026-10-27:r1"
+    assert handle_news_plan_failure(store, store.get(manual), NewsPlanError("검증 실패"),
+                                    now=1000) is None
+    assert store.get(manual)["status"] == "blocked"
+
+
+def test_replace_failed_counts_chained_schedule_keys_against_the_same_day(tmp_path):
+    from shorts_local.news_store import NewsStore
+    from shorts_local.store import Store
+
+    store = Store(tmp_path)
+    store.update_profile_settings("default", {"production_type": "news"})
+    news = NewsStore(store)
+    source = news.add_source("https://example.com/feed", now=0)
+    news.apply_feed(source["id"], [
+        {"url": f"https://example.com/{index}", "published_at": 100 + index} for index in range(6)
+    ], now=1000)
+    news.enqueue_next(key="schedule:2026-10-27", now=1000)
+    key, keys = "schedule:2026-10-27", []
+    for _ in range(4):
+        replacement = news.replace_failed("default", schedule_key=key, now=1000)
+        if replacement is None:
+            break
+        job = store.get(replacement)
+        keys.append(job["dedup_key"])
+        news.reject_item(job["input"]["item_id"], "기획 검증 실패")
+        key = job["dedup_key"]
+    assert keys == ["schedule:2026-10-27:r1", "schedule:2026-10-27:r2", "schedule:2026-10-27:r3"]
+    assert store.value("news_replace:default:2026-10-27") == 3

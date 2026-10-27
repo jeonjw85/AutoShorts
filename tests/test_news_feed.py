@@ -21,7 +21,8 @@ def test_news_schedule_waits_and_survives_type_change(tmp_path):
     from shorts_local.news_store import NewsStore
 
     s = Store(tmp_path)
-    s.update_profile_settings("default", {"production_type": "news", "schedule_time": "00:00"})
+    s.update_profile_settings("default", {"production_type": "news", "schedule_time": "00:00",
+                                          "news_max_age_hours": 0})
     news = NewsStore(s)
     source = news.add_source("https://example.com/feed", now=100)
     now = datetime(2026, 10, 12, 9, tzinfo=ZoneInfo("Asia/Seoul"))

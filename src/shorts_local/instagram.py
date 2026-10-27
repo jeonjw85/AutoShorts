@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import os
+import random
 import shutil
 import sys
 import time
@@ -64,7 +65,7 @@ def classify_error(error: Exception) -> InstagramError:
         if isinstance(error, InstagramError):
             return error
         if isinstance(error, sdk.TooManyRequestsException):
-            return InstagramError("rate_limit", retry_at=time.time() + 3600)
+            return InstagramError("rate_limit", retry_at=time.time() + 3600 * random.uniform(0.8, 1.2))
         if isinstance(error, (sdk.LoginRequiredException, sdk.LoginException)):
             return InstagramError("auth_wait")
         if isinstance(error, (sdk.ProfileNotExistsException, sdk.QueryReturnedNotFoundException,
@@ -73,7 +74,7 @@ def classify_error(error: Exception) -> InstagramError:
         if isinstance(error, (sdk.InstaloaderException, sdk.AbortDownloadException)):
             message = str(error).lower()
             if "feedback_required" in message:
-                return InstagramError("rate_limit", retry_at=time.time() + 3600)
+                return InstagramError("rate_limit", retry_at=time.time() + 3600 * random.uniform(0.8, 1.2))
             if any(marker in message for marker in
                    ("checkpoint", "challenge_required", "login_required", "login page", "logged out")):
                 return InstagramError("auth_wait")
@@ -82,9 +83,18 @@ def classify_error(error: Exception) -> InstagramError:
     return InstagramError("transient")
 
 
-def check_wait(store: Store, *, auth: bool = True) -> None:
-    if auth and store.value("instagram_auth_wait", False):
-        raise InstagramError("auth_wait")
+def auth_wait_channels(store: Store) -> set[str]:
+    if store.value("instagram_auth_wait", False):
+        return {profile.id for profile in store.profiles()}
+    values = store.value("instagram_auth_wait_channels", [])
+    return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+
+
+def check_wait(store: Store, channel_id: str | None = None, *, auth: bool = True) -> None:
+    if auth:
+        waiting = auth_wait_channels(store)
+        if (channel_id is None and waiting) or (channel_id is not None and channel_id in waiting):
+            raise InstagramError("auth_wait")
     until = store.value("instagram_next_run", 0)
     if until > time.time():
         raise InstagramError("deferred", retry_at=until)
@@ -132,7 +142,7 @@ def _loader(root: Path, *, load_session: bool = True):
             wait = 3600
             if self._query_timestamps.get(query_type):
                 wait = max(wait, self.query_waittime(query_type, time.monotonic(), True))
-            raise InstagramError("rate_limit", retry_at=time.time() + wait)
+            raise InstagramError("rate_limit", retry_at=time.time() + wait * random.uniform(0.8, 1.2))
 
     loader = sdk.Instaloader(quiet=True, sleep=False, max_connection_attempts=1,
                             request_timeout=20, rate_controller=PersistentRate)
@@ -152,7 +162,26 @@ def _loader(root: Path, *, load_session: bool = True):
     return loader
 
 
-def login_instagram(store: Store, username: str, *, prompt_secret) -> str:
+def load_session_file(path: Path, *, username: str | None = None) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise ValueError("세션 파일을 JSON으로 읽을 수 없습니다.") from None
+    if not isinstance(data, dict):
+        raise ValueError("세션 파일은 JSON 객체여야 합니다.")
+    if "session" in data:
+        if username and data.get("username") not in (None, username):
+            raise ValueError("세션 파일의 사용자 이름이 다릅니다.")
+        data = data["session"]
+    if not isinstance(data, dict) or not all(
+            isinstance(data.get(key), str) and data[key]
+            for key in ("sessionid", "csrftoken", "ds_user_id")):
+        raise ValueError("세션 파일에 sessionid, csrftoken, ds_user_id가 필요합니다.")
+    return data
+
+
+def login_instagram(store: Store, username: str, *, prompt_secret=None,
+                    session_file: Path | None = None) -> str:
     import instaloader as sdk
 
     username = normalize_username(username)
@@ -161,12 +190,19 @@ def login_instagram(store: Store, username: str, *, prompt_secret) -> str:
             check_wait(store, auth=False)
             loader = _loader(store.root, load_session=False)
             try:
-                try:
-                    loader.login(username, prompt_secret("인스타그램 비밀번호"))
-                except sdk.TwoFactorAuthRequiredException:
-                    loader.two_factor_login(prompt_secret("인스타그램 2단계 인증 코드"))
-                if loader.test_login() != username:
-                    raise InstagramError("auth_wait")
+                if session_file is not None:
+                    loader.load_session(username, load_session_file(session_file, username=username))
+                    if loader.test_login() != username:
+                        raise ValueError(f"세션 파일이 @{username} 계정과 맞지 않습니다.")
+                else:
+                    if prompt_secret is None:
+                        raise ValueError("비밀번호 입력이 필요합니다.")
+                    try:
+                        loader.login(username, prompt_secret("인스타그램 비밀번호"))
+                    except sdk.TwoFactorAuthRequiredException:
+                        loader.two_factor_login(prompt_secret("인스타그램 2단계 인증 코드"))
+                    if loader.test_login() != username:
+                        raise InstagramError("auth_wait")
                 generation = uuid.uuid4().hex
                 atomic_json(store.root / "auth/instagram.json", {
                     "username": username, "session": loader.save_session(), "generation": generation,
@@ -177,6 +213,8 @@ def login_instagram(store: Store, username: str, *, prompt_secret) -> str:
                 return username
             finally:
                 loader.close()
+    except ValueError:
+        raise
     except Exception as exc:
         raise classify_error(exc) from None
 
@@ -370,29 +408,33 @@ def cached_source(workdir: Path, input: InstagramInput) -> SourceMedia | None:
     return None
 
 
-def _fetch_media(root: Path, input: InstagramInput, workdir: Path, settings: Settings) -> SourceMedia:
+def _fetch_with(loader, input: InstagramInput, temp: Path, settings: Settings) -> SourceMedia:
     import instaloader as sdk
 
+    post = sdk.Post.from_shortcode(loader.context, input.shortcode)
+    metadata = _post_value(post)
+    if metadata.media_type != "video" or not 1 <= float(post.video_duration) <= 600:
+        raise InstagramError("unsupported")
+    # In pinned Instaloader, video_url ranks variants via unchecked HEAD
+    # redirects. Use the declared metadata URL; all media I/O belongs to
+    # our validated, bounded downloader.
+    _download_media(post._field("video_url"), temp, min(settings.stage_timeout, 600))
+    info = probe(temp)
+    videos = [s for s in info["streams"] if s["codec_type"] == "video"]
+    duration = float(info["format"]["duration"])
+    if len(videos) != 1 or not 1 <= duration <= 600:
+        raise InstagramError("unsupported")
+    return SourceMedia(post=metadata, sha256=file_hash(temp), bytes=temp.stat().st_size,
+                       duration=duration, width=videos[0]["width"],
+                       height=videos[0]["height"],
+                       has_audio=any(s["codec_type"] == "audio" for s in info["streams"]))
+
+
+def _fetch_media(root: Path, input: InstagramInput, workdir: Path, settings: Settings) -> SourceMedia:
     loader = _loader(root)
     temp = workdir / "source.partial"
     try:
-        post = sdk.Post.from_shortcode(loader.context, input.shortcode)
-        metadata = _post_value(post)
-        if metadata.media_type != "video" or not 1 <= float(post.video_duration) <= 600:
-            raise InstagramError("unsupported")
-        # In pinned Instaloader, video_url ranks variants via unchecked HEAD
-        # redirects. Use the declared metadata URL; all media I/O belongs to
-        # our validated, bounded downloader.
-        _download_media(post._field("video_url"), temp, min(settings.stage_timeout, 600))
-        info = probe(temp)
-        videos = [s for s in info["streams"] if s["codec_type"] == "video"]
-        duration = float(info["format"]["duration"])
-        if len(videos) != 1 or not 1 <= duration <= 600:
-            raise InstagramError("unsupported")
-        media = SourceMedia(post=metadata, sha256=file_hash(temp), bytes=temp.stat().st_size,
-                            duration=duration, width=videos[0]["width"],
-                            height=videos[0]["height"],
-                            has_audio=any(s["codec_type"] == "audio" for s in info["streams"]))
+        media = _fetch_with(loader, input, temp, settings)
         os.replace(temp, workdir / "source.mp4")
         atomic_json(workdir / "source.json", media.model_dump())
         return media
@@ -403,7 +445,8 @@ def _fetch_media(root: Path, input: InstagramInput, workdir: Path, settings: Set
         loader.close()
 
 
-def fetch_source(root: Path, input: InstagramInput, workdir: Path, settings: Settings) -> SourceMedia:
+def fetch_source(root: Path, input: InstagramInput, workdir: Path, settings: Settings,
+                 channel_id: str | None = None) -> SourceMedia:
     if cached := cached_source(workdir, input):
         return cached
     if importlib.util.find_spec("instaloader") is None:
@@ -416,7 +459,7 @@ def fetch_source(root: Path, input: InstagramInput, workdir: Path, settings: Set
     try:
         with exclusive_lock(root / "instagram.lock"):
             generation = session_generation(root)
-            check_wait(store)
+            check_wait(store, channel_id)
             atomic_json(workdir / "input.json", input.model_dump())
             settings.save(workdir / "settings.json")
             result = workdir / "fetch-result.json"

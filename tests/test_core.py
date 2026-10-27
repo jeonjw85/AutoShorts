@@ -90,3 +90,16 @@ def test_process_lock_excludes_another_worker(tmp_path):
     with exclusive_lock(tmp_path / "worker.lock"):
         with pytest.raises(BusyError), exclusive_lock(tmp_path / "worker.lock"):
             pass
+
+
+def test_news_freshness_window_defaults():
+    from shorts_local.config import Settings
+
+    settings = Settings()
+    assert settings.news_max_age_hours == 48
+    assert Settings(news_max_age_hours=0).news_max_age_hours == 0
+    assert Settings(news_max_age_hours=720).news_max_age_hours == 720
+    with pytest.raises(ValueError):
+        Settings(news_max_age_hours=721)
+    with pytest.raises(ValueError):
+        Settings(news_max_age_hours=-1)

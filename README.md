@@ -147,9 +147,10 @@ Install the complete local media toolchain and download the analysis models:
 uv sync --extra mlx --extra images --extra instagram --group dev
 .venv/bin/shorts-local models --instagram
 .venv/bin/shorts-local instagram-login YOUR_USERNAME
+.venv/bin/shorts-local instagram-login YOUR_USERNAME --session-file ~/session.json
 ```
 
-Password and two-factor prompts use hidden terminal input. Successful login restores jobs waiting for Instagram authentication.
+Password and two-factor prompts use hidden terminal input. Successful login restores jobs waiting for Instagram authentication. `--session-file` imports an exported Instaloader session instead of prompting; malformed files or a session for a different account stop with an error.
 
 ### Import a direct link
 
@@ -325,6 +326,10 @@ launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/dev.shorts-local.plist
 - Completed stages are reused after interruption; invalid or partial artifacts are rejected.
 - Global and channel pauses are independent. A blocked channel does not prevent another channel's eligible job from running.
 - Ordinary failures have bounded retries. Authentication failures wait for login; quota and rate-limit failures back off.
+- Upload receipts record the channel's reported `uploadStatus` and `privacyStatus`. A rejected or failed upload stays blocked, and a privacy mismatch is reported once without deleting the video.
+- YouTube OAuth tokens issued in `Testing` expire after seven days. Publish the consent screen (`In production`); the service warns once a day from day six when the auth file records `granted_at`.
+- `cleanup` previews transient artifacts for finished jobs; add `--apply` to delete them. Final videos and recovery records are never removed.
+- Service liveness is in `data/heartbeat.json` (15-second writes, stale after 5 minutes). Without Telegram, alerts are appended to `data/alerts.log` and are not sent later.
 - Upload sessions and receipts support resumption and deduplication. If the upload result is uncertain, the job waits instead of starting another upload.
 - Generation is deferred below 5 GiB of free disk space. Models, source media, and completed outputs are retained.
 - Database migrations preserve existing jobs and create backups under `data/backups/`.

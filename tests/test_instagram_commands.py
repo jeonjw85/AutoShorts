@@ -79,7 +79,8 @@ def test_source_scan_and_login_do_not_run_inside_command_transaction(tmp_path, m
     home = ["--home", str(tmp_path)]
     assert runner.invoke(app, home + ["source", "scan"]).exit_code == 0
     assert calls == ["default"]
-    def login(store, username, *, prompt_secret):
+    def login(store, username, *, prompt_secret, session_file=None):
+        assert session_file is None
         assert prompt_secret("비밀번호") == "hidden-secret"
         with Store(store.root).transaction():
             pass
@@ -158,3 +159,79 @@ def test_model_download_rejects_insufficient_disk_space(tmp_path, monkeypatch, f
     assert result.exit_code != 0, result.output
     assert "여유 공간" in result.output
     assert repos == []
+
+
+def test_session_file_accepts_flat_and_wrapped_dicts(tmp_path):
+    import json
+
+    from shorts_local.instagram import load_session_file
+
+    flat = tmp_path / "flat.json"
+    flat.write_text(json.dumps({"sessionid": "s", "csrftoken": "c", "ds_user_id": "1"}))
+    assert load_session_file(flat)["sessionid"] == "s"
+    wrapped = tmp_path / "wrapped.json"
+    wrapped.write_text(json.dumps({"username": "pets",
+                                   "session": {"sessionid": "s2", "csrftoken": "c", "ds_user_id": "2"}}))
+    assert load_session_file(wrapped, username="pets")["sessionid"] == "s2"
+    with pytest.raises(ValueError):
+        load_session_file(wrapped, username="dogs")
+    broken = tmp_path / "broken.json"
+    broken.write_text(json.dumps({"sessionid": "s"}))
+    with pytest.raises(ValueError):
+        load_session_file(broken)
+
+
+def test_login_with_session_file_skips_password_and_saves_auth(tmp_path, monkeypatch):
+    import json
+
+    import shorts_local.instagram as target
+    from shorts_local.store import Store
+
+    class FakeLoader:
+        def __init__(self):
+            self.loaded = None
+
+        def load_session(self, username, session):
+            self.loaded = (username, session)
+
+        def test_login(self):
+            return "pets"
+
+        def save_session(self):
+            return {"sessionid": "s", "csrftoken": "c", "ds_user_id": "1"}
+
+        def close(self):
+            pass
+
+    loader = FakeLoader()
+    monkeypatch.setattr(target, "_loader", lambda root, load_session=True: loader)
+    source = tmp_path / "session.json"
+    source.write_text(json.dumps({"sessionid": "s", "csrftoken": "c", "ds_user_id": "1"}))
+    store = Store(tmp_path)
+    assert target.login_instagram(store, "pets", session_file=source) == "pets"
+    saved = json.loads((tmp_path / "auth/instagram.json").read_text())
+    assert saved["username"] == "pets" and saved["session"]["sessionid"] == "s"
+    assert loader.loaded == ("pets", {"sessionid": "s", "csrftoken": "c", "ds_user_id": "1"})
+
+
+def test_session_file_for_the_wrong_account_says_so(tmp_path, monkeypatch):
+    import json
+
+    import shorts_local.instagram as target
+    from shorts_local.store import Store
+
+    class FakeLoader:
+        def load_session(self, username, session):
+            pass
+
+        def test_login(self):
+            return "dogs"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(target, "_loader", lambda root, load_session=True: FakeLoader())
+    source = tmp_path / "session.json"
+    source.write_text(json.dumps({"sessionid": "s", "csrftoken": "c", "ds_user_id": "1"}))
+    with pytest.raises(ValueError, match="세션 파일"):
+        target.login_instagram(Store(tmp_path), "pets", session_file=source)

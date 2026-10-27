@@ -78,7 +78,7 @@ def prepare_imported_video(store: Store, job: dict, settings: Settings,
         raise BlockedError("디스크 여유 공간이 5GiB 미만입니다. 공간 확보 후 재시도하세요.")
     atomic_json(workdir / "input.json", input.model_dump())
     store.update(job["id"], stage="fetch")
-    source = fetch_source(store.root, input, workdir, settings)
+    source = fetch_source(store.root, input, workdir, settings, channel_id=job["channel_id"])
     InstagramStore(store).record_media(input.item_id, source, job_id=job["id"])
     store.update(job["id"], stage="analyze")
     analysis = analyze_source(source, workdir, settings)

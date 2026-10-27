@@ -74,6 +74,8 @@ class NewsStore:
         added = 0
         with self.store.transaction(), self.store.db() as db:
             source = self.source(source_id)
+            hours = self.store.profile(source["channel_id"]).settings.news_max_age_hours
+            cutoff = now - hours * 3600 if hours else None
             for entry in entries[:200]:
                 try:
                     data = NewsInput(item_id=uuid.uuid4().hex[:12], source_id=source_id,
@@ -82,6 +84,8 @@ class NewsStore:
                     continue
                 if data.published_at is None or not source["registered_at"] <= data.published_at <= now:
                     continue
+                if cutoff is not None and data.published_at < cutoff:
+                    continue
                 added += db.execute("""INSERT OR IGNORE INTO news_items
                     (id,channel_id,source_id,canonical_url,title,published_at,discovered_at,status)
                     VALUES (?,?,?,?,?,?,?,'available')""",
@@ -89,15 +93,20 @@ class NewsStore:
                      str(entry.get("title", ""))[:500], data.published_at, now)).rowcount
         return added
 
-    def enqueue_next(self, *, channel_id="default", key=None, publish=None) -> str | None:
+    def enqueue_next(self, *, channel_id="default", key=None, publish=None,
+                     now: float | None = None) -> str | None:
         with self.store.transaction(), self.store.db() as db:
             self.store.profile(channel_id)
             if existing := self._existing_key(channel_id, key):
                 return existing
+            hours = self.store.profile(channel_id).settings.news_max_age_hours
+            cutoff = (time.time() if now is None else now) - hours * 3600 if hours else None
             item = db.execute("""SELECT i.* FROM news_items i
                 JOIN news_sources s ON s.id=i.source_id
                 WHERE i.channel_id=? AND i.status='available' AND i.job_id IS NULL AND s.active=1
-                ORDER BY i.published_at,i.canonical_url LIMIT 1""", (channel_id,)).fetchone()
+                AND (? IS NULL OR i.published_at >= ?)
+                ORDER BY i.published_at,i.canonical_url LIMIT 1""",
+                (channel_id, cutoff, cutoff)).fetchone()
             return self._reserve(item, publish, key) if item else None
 
     def set_source_active(self, source_id: str, active: bool) -> None:
@@ -150,14 +159,32 @@ class NewsStore:
             if source["error"] != message:
                 self.store.notify(f"{self.store.profile(source['channel_id']).label}\n{message}\n수집원: {source_id}")
 
+    def replace_failed(self, channel_id: str, *, schedule_key: str, now: float) -> str | None:
+        parts = schedule_key.split(":")
+        date = parts[1] if len(parts) > 1 and parts[1] else "unknown"
+        state_key = f"news_replace:{channel_id}:{date}"
+        with self.store.transaction():
+            count = self.store.value(state_key, 0)
+            count = count if isinstance(count, int) and not isinstance(count, bool) else 0
+            if count >= 3:
+                return None
+            replacement = self.enqueue_next(channel_id=channel_id,
+                                            key=f"schedule:{date}:r{count + 1}", now=now)
+            if replacement is not None:
+                self.store.set_value(state_key, count + 1)
+            return replacement
+
     def reject_item(self, item_id: str, reason: str) -> None:
         with self.store.db() as db:
             db.execute("UPDATE news_items SET status='unsupported',reason=? WHERE id=?", (reason[:500], item_id))
 
     def channel_state(self, channel_id: str) -> dict:
+        hours = self.store.profile(channel_id).settings.news_max_age_hours
+        cutoff = time.time() - hours * 3600 if hours else None
         with self.store.db() as db:
             count = db.execute("""SELECT count(*) FROM news_items i JOIN news_sources s ON s.id=i.source_id
-                WHERE i.channel_id=? AND i.status='available' AND i.job_id IS NULL AND s.active=1""",
-                (channel_id,)).fetchone()[0]
+                WHERE i.channel_id=? AND i.status='available' AND i.job_id IS NULL AND s.active=1
+                AND (? IS NULL OR i.published_at >= ?)""",
+                (channel_id, cutoff, cutoff)).fetchone()[0]
         times = [s["next_run"] for s in self.sources(channel_id) if s["active"]]
         return {"available": count, "next_run": min(times) if times else None, "auth_wait": False}

@@ -196,7 +196,7 @@ def test_import_waits_do_not_block_other_channels(tmp_path, monkeypatch, story_d
     job = InstagramStore(store).import_video(post().url)
     other = store.enqueue(Settings(width=360, height=640, min_seconds=1), channel_id="other")
     prepare_media(store, other, story_data)
-    def unavailable(*args):
+    def unavailable(*args, **kwargs):
         raise InstagramError(code)
     monkeypatch.setattr(imported, "fetch_source", unavailable)
     assert pipeline.run_next(tmp_path) == job

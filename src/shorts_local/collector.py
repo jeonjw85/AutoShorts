@@ -49,7 +49,7 @@ def run_collection(root: Path, *, channel_id: str | None = None, now: float | No
             folder = root / "collect" / source["id"]
             try:
                 with exclusive_lock(root / "instagram.lock"):
-                    check_wait(store)
+                    check_wait(store, source["channel_id"])
                     # A pause may have happened while selecting/waiting for the API slot.
                     current = ig.due_source(channel_id=channel_id, now=now)
                     if current is None:
